@@ -12,6 +12,27 @@ Currently only [MBR (Master boot record)](https://en.wikipedia.org/wiki/Master_b
 - Access partition information (address, size, type, label)
 - Example projects included
 
+## Alignment and layout validation (MBR generation)
+
+When generating an MBR (`esp_mbr_generate` / `esp_ext_part_list_bdl_write`), the
+behavior is controlled through `esp_mbr_generate_extra_args_t`:
+
+- `alignment`: partition start alignment. `ESP_EXT_PART_ALIGN_AUTO` (the value a
+  zero-initialized struct selects) resolves to a 1 MiB default;
+  `ESP_EXT_PART_ALIGN_NONE` leaves start LBAs untouched; `ESP_EXT_PART_ALIGN_4KiB`
+  and `ESP_EXT_PART_ALIGN_1MiB` request a specific alignment.
+- `align_policy`: what happens to a partition's size when alignment moves its
+  start. `ESP_EXT_PART_ALIGN_POLICY_KEEP_SIZE` (default) keeps the requested size
+  as the length from the aligned start (matching `fdisk`/`parted`);
+  `ESP_EXT_PART_ALIGN_POLICY_REJECT` returns an error if a start was not already
+  aligned; `ESP_EXT_PART_ALIGN_POLICY_PRESERVE_END` shrinks the size so the end
+  stays at the originally requested `address + size`.
+- `disable_overlap_check`: overlapping partitions are rejected by default; set
+  this to skip the check.
+- `total_size`: when non-zero, partitions that extend past this many bytes are
+  rejected. The block-device write helper auto-fills this from the device geometry
+  when left `0`.
+
 ## Example code
 
 ```c

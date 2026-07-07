@@ -5,6 +5,7 @@
  */
 
 #include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include "esp_err.h"
 #include "esp_log.h"
@@ -183,7 +184,37 @@ esp_err_t esp_mbr_partition_set(mbr_t *mbr, uint8_t partition_index, esp_ext_par
     if (item->info.flags & ESP_EXT_PART_FLAG_ACTIVE) {
         partition->status = MBR_PARTITION_STATUS_ACTIVE;
     }
-    partition->lba_start = esp_mbr_lba_align((uint32_t) first_sector_address, extra_args->sector_size, extra_args->alignment);
+
+    uint32_t aligned_start = esp_mbr_lba_align((uint32_t) first_sector_address, extra_args->sector_size, extra_args->alignment);
+
+    if (aligned_start != (uint32_t) first_sector_address) {
+        // Alignment moved the partition start; apply the configured policy.
+        switch (extra_args->align_policy) {
+        case ESP_EXT_PART_ALIGN_POLICY_KEEP_SIZE:
+            // Default: keep the requested size as the length from the aligned start (matches fdisk/parted).
+            break;
+        case ESP_EXT_PART_ALIGN_POLICY_REJECT:
+            ESP_LOGE(TAG, "Partition %u start (sector %" PRIu32 ") is not aligned and align_policy is REJECT",
+                     partition_index, (uint32_t) first_sector_address);
+            return ESP_ERR_INVALID_ARG;
+        case ESP_EXT_PART_ALIGN_POLICY_PRESERVE_END: {
+            // Shrink the size so the end stays at the originally requested address + size.
+            uint64_t orig_end = first_sector_address + sector_count; // exclusive end, in sectors
+            if ((uint64_t) aligned_start >= orig_end) {
+                ESP_LOGE(TAG, "Alignment consumed the whole partition %u (aligned start %" PRIu32 " >= end %" PRIu64 ")",
+                         partition_index, aligned_start, orig_end);
+                return ESP_ERR_INVALID_SIZE;
+            }
+            sector_count = orig_end - (uint64_t) aligned_start;
+            break;
+        }
+        default:
+            ESP_LOGE(TAG, "Unknown align_policy %d", (int) extra_args->align_policy);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+
+    partition->lba_start = aligned_start;
     partition->sector_count = (uint32_t) sector_count;
     partition->type = f_generate_supported_partition_types(item->info.type);
 
@@ -206,8 +237,11 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
     // Set default arguments for MBR generation
     esp_mbr_generate_extra_args_t args = {
         .sector_size = part_list->sector_size != ESP_EXT_PART_SECTOR_SIZE_UNKNOWN ? part_list->sector_size : ESP_EXT_PART_SECTOR_SIZE_512B, // Default sector size
-        .alignment = ESP_EXT_PART_ALIGN_1MiB, // Default alignment
+        .alignment = ESP_EXT_PART_ALIGN_AUTO, // Resolved to the default (1 MiB) below unless overridden
         .keep_signature = false, // Default is to generate a new disk signature
+        .align_policy = ESP_EXT_PART_ALIGN_POLICY_KEEP_SIZE, // Default: keep the requested size (current behavior)
+        .disable_overlap_check = false, // Default: reject overlapping partitions
+        .total_size = 0, // Default: no "fits within disk" check
     };
 
     // Load extra arguments if provided
@@ -215,13 +249,22 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
         if (extra_args->sector_size != ESP_EXT_PART_SECTOR_SIZE_UNKNOWN) {
             args.sector_size = extra_args->sector_size;
         }
-        if (extra_args->alignment != ESP_EXT_PART_ALIGN_NONE) {
+        if (extra_args->alignment != ESP_EXT_PART_ALIGN_AUTO) {
+            // Honor an explicit alignment, including ESP_EXT_PART_ALIGN_NONE
             args.alignment = extra_args->alignment;
         }
         args.keep_signature = extra_args->keep_signature;
         if (extra_args->esp_mbr_generate_custom_supported_partition_types) {
             args.esp_mbr_generate_custom_supported_partition_types = extra_args->esp_mbr_generate_custom_supported_partition_types;
         }
+        args.align_policy = extra_args->align_policy;
+        args.disable_overlap_check = extra_args->disable_overlap_check;
+        args.total_size = extra_args->total_size;
+    }
+
+    // Resolve ESP_EXT_PART_ALIGN_AUTO to the library default alignment (1 MiB)
+    if (args.alignment == ESP_EXT_PART_ALIGN_AUTO) {
+        args.alignment = ESP_EXT_PART_ALIGN_1MiB;
     }
 
     mbr->boot_signature = MBR_SIGNATURE;
@@ -253,6 +296,46 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
             return err; // Error setting partition
         }
         i += 1;
+    }
+    int partition_count = i; // Number of partition entries actually written
+
+    // Validate the generated layout (using the final post-alignment LBA values).
+    uint64_t total_sectors = 0;
+    if (args.total_size != 0) {
+        total_sectors = esp_ext_part_bytes_to_sector_count(args.total_size, args.sector_size);
+    }
+
+    for (int a = 0; a < partition_count; a++) {
+        mbr_partition_t *pa = &mbr->partition_table[a];
+        if (pa->type == 0x00) {
+            continue; // Empty entry (e.g. a ESP_EXT_PART_TYPE_NONE item), nothing to validate
+        }
+        uint64_t a_start = pa->lba_start;
+        uint64_t a_end = a_start + pa->sector_count; // exclusive
+
+        // "Fits within disk" check (only when a total size was provided/auto-filled).
+        if (total_sectors != 0 && a_end > total_sectors) {
+            ESP_LOGE(TAG, "Partition %d (sectors %" PRIu64 "..%" PRIu64 ") runs past the disk (%" PRIu64 " sectors)",
+                     a, a_start, a_end, total_sectors);
+            return ESP_ERR_INVALID_SIZE;
+        }
+
+        // Overlap check against previously placed partitions.
+        if (!args.disable_overlap_check) {
+            for (int b = 0; b < a; b++) {
+                mbr_partition_t *pb = &mbr->partition_table[b];
+                if (pb->type == 0x00) {
+                    continue;
+                }
+                uint64_t b_start = pb->lba_start;
+                uint64_t b_end = b_start + pb->sector_count; // exclusive
+                if (a_start < b_end && b_start < a_end) {
+                    ESP_LOGE(TAG, "Partition %d (sectors %" PRIu64 "..%" PRIu64 ") overlaps partition %d (sectors %" PRIu64 "..%" PRIu64 ")",
+                             a, a_start, a_end, b, b_start, b_end);
+                    return ESP_ERR_INVALID_STATE;
+                }
+            }
+        }
     }
 
     return ESP_OK;

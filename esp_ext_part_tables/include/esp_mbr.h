@@ -79,6 +79,9 @@ typedef struct {
     esp_ext_part_align_t alignment; // Alignment hint for correct LBA alignment
     bool keep_signature; // If true, the disk signature will be preserved in the generated MBR and not overwritten with a random value
     uint8_t (*esp_mbr_generate_custom_supported_partition_types)(uint8_t); // Custom function for generating supported MBR partition types, optional
+    esp_ext_part_align_policy_t align_policy; // Policy applied when alignment moves a partition start (default 0 = KEEP_SIZE)
+    bool disable_overlap_check; // If false (default), generation fails when two partitions overlap
+    uint64_t total_size; // Total device size in bytes for the "fits within disk" check; 0 disables the check. The BDL write helper auto-fills this from the device geometry when left 0.
 } esp_mbr_generate_extra_args_t;
 
 /**
@@ -113,16 +116,29 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
  * options such as sector size, alignment, and signature preservation can be specified
  * via the extra_args parameter.
  *
+ * After all partition entries are written, the generated layout is validated:
+ * overlapping partitions are rejected (unless `extra_args->disable_overlap_check`
+ * is set), and if `extra_args->total_size` is non-zero, partitions that run past
+ * the end of the disk are rejected.
+ *
+ * Alignment behavior:
+ *   - `extra_args->alignment == ESP_EXT_PART_ALIGN_AUTO` (the default when a
+ *     zero-initialized `extra_args` is used) resolves to a 1 MiB alignment.
+ *   - `ESP_EXT_PART_ALIGN_NONE` leaves partition start LBAs untouched.
+ *   - When alignment moves a partition start, `extra_args->align_policy` decides
+ *     what happens to the size (see `esp_ext_part_align_policy_t`).
+ *
  * @note This function is not thread-safe.
  *
  * @param[out] mbr         Pointer to the blank MBR structure to be filled (must already be allocated and be at least `MBR_SIZE` bytes).
  * @param[in]  part_list   Pointer to the partition list structure containing partition entries to encode.
- * @param[in]  extra_args  Optional extra arguments for generation (can be NULL for defaults).
+ * @param[in]  extra_args  Optional extra arguments for generation (can be NULL for defaults: 1 MiB alignment, KEEP_SIZE policy, overlap checking enabled, no disk-bounds check).
  *
  * @return
  *     - ESP_OK:                Generation was successful.
- *     - ESP_ERR_INVALID_ARG:   Invalid arguments were provided.
- *     - ESP_ERR_INVALID_STATE: Error filling partition entry.
+ *     - ESP_ERR_INVALID_ARG:   Invalid arguments were provided, or a partition start was not aligned while `align_policy` is `ESP_EXT_PART_ALIGN_POLICY_REJECT`.
+ *     - ESP_ERR_INVALID_STATE: Error filling a partition entry, or two partitions overlap.
+ *     - ESP_ERR_INVALID_SIZE:  Alignment consumed a whole partition (PRESERVE_END policy), or a partition runs past `total_size`.
  *     - ESP_ERR_NOT_SUPPORTED: Partition address or size (sector count) exceeds 32-bit limit of MBR.
  *     - Other error codes from `esp_ext_part_list_signature_get` or `esp_mbr_partition_set`.
  */
@@ -137,6 +153,14 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
  * with the information from the given partition list item. Additional arguments for
  * partition generation must be supplied via the extra_args parameter.
  *
+ * When alignment moves the partition start, `extra_args->align_policy` decides how
+ * the size is treated (keep it, reject, or shrink to preserve the end; see
+ * `esp_ext_part_align_policy_t`). This low-level function does NOT resolve
+ * `ESP_EXT_PART_ALIGN_AUTO` to a default alignment - callers that want the 1 MiB
+ * default should either go through `esp_mbr_generate` or pass a concrete alignment
+ * value. It also does NOT perform overlap or disk-bounds validation (that is done
+ * by `esp_mbr_generate`).
+ *
  * @note This function is not thread-safe.
  *
  * @warning If the partition entry is empty (i.e., `item->info.type` is `ESP_EXT_PART_TYPE_NONE`), it will be cleared in the MBR.
@@ -150,8 +174,9 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
  *
  * @return
  *     - ESP_OK:                Success.
- *     - ESP_ERR_INVALID_ARG:   Invalid arguments were provided.
+ *     - ESP_ERR_INVALID_ARG:   Invalid arguments were provided, or the start was not aligned while `align_policy` is `ESP_EXT_PART_ALIGN_POLICY_REJECT`.
  *     - ESP_ERR_INVALID_STATE: Error filling partition entry.
+ *     - ESP_ERR_INVALID_SIZE:  Alignment consumed the whole partition (PRESERVE_END policy).
  *     - ESP_ERR_NOT_SUPPORTED: Partition address or size (sector count) exceeds 32-bit limit of MBR.
  */
 esp_err_t esp_mbr_partition_set(mbr_t *mbr, uint8_t partition_index, esp_ext_part_list_item_t *item, esp_mbr_generate_extra_args_t *extra_args);

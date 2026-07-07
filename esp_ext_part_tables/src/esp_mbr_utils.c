@@ -61,7 +61,8 @@ void esp_mbr_lba_to_chs_arr(uint8_t chs[3], uint32_t lba)
 
 uint32_t esp_mbr_lba_align(uint32_t lba, esp_ext_part_sector_size_t sector_size, esp_ext_part_align_t alignment)
 {
-    if (sector_size == 0 || alignment == 0) {
+    // ESP_EXT_PART_ALIGN_NONE (and a 0/unset alignment or sector size) means "leave the LBA untouched".
+    if (sector_size == 0 || alignment == 0 || alignment == ESP_EXT_PART_ALIGN_NONE) {
         return lba; // No alignment
     }
     uint32_t alignment_sectors = alignment / sector_size;

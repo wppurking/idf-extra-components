@@ -212,7 +212,11 @@ TEST_CASE("Test esp_mbr_generate with esp_mbr_parse", "[esp_ext_part_table]")
     };
     esp_ext_part_list_item_t item2 = {
         .info = {
-            .address = 10000, // Should be round up to 10240 (aligned to 1MiB) due to defined sector size and alignment in `esp_mbr_generate_extra_args_t args` below
+            // 10000 sectors -> aligned up to 10240 (1 MiB). Note this is expressed in
+            // sectors (converted to bytes); using a raw byte value like 10000 here
+            // would be only ~20 sectors and would align back to 2048, overlapping
+            // item1 - which the generator's overlap validation now rejects.
+            .address = esp_ext_part_sector_count_to_bytes(10000, mbr_args.sector_size),
             .size = esp_ext_part_sector_count_to_bytes(2 * 10240, mbr_args.sector_size),
             .type = ESP_EXT_PART_TYPE_LITTLEFS,
             .label = NULL,
@@ -357,6 +361,265 @@ TEST_CASE("Test esp_mbr_partition_set and esp_mbr_remove_gaps_between_partiton_e
 
     // Deinitialize the part list
     TEST_ESP_OK(esp_ext_part_list_deinit(&part_list_from_mbr_correct));
+}
+
+// ---------------------------------------------------------------------------
+// Alignment policy, alignment sentinels, and layout validation tests
+// ---------------------------------------------------------------------------
+
+// Helper: generate a single-partition MBR and return the raw partition entry 0.
+static esp_err_t gen_single_partition(mbr_t *mbr,
+                                      uint64_t address_bytes,
+                                      uint64_t size_bytes,
+                                      esp_ext_part_type_known_t type,
+                                      esp_mbr_generate_extra_args_t *args)
+{
+    esp_ext_part_list_t part_list = {0};
+    esp_ext_part_list_item_t item = {
+        .info = {
+            .address = address_bytes,
+            .size = size_bytes,
+            .type = type,
+            .label = NULL,
+        }
+    };
+    esp_err_t err = esp_ext_part_list_insert(&part_list, &item);
+    if (err != ESP_OK) {
+        esp_ext_part_list_deinit(&part_list);
+        return err;
+    }
+    err = esp_mbr_generate(mbr, &part_list, args);
+    esp_ext_part_list_deinit(&part_list);
+    return err;
+}
+
+// Test 5: KEEP_SIZE (default) - unaligned start is aligned up, size (sector_count) stays unchanged.
+TEST_CASE("Test align policy KEEP_SIZE keeps size when start is aligned up", "[esp_ext_part_table]")
+{
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+        .align_policy = ESP_EXT_PART_ALIGN_POLICY_KEEP_SIZE,
+    };
+
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+
+    // Start at sector 8 (=> aligned up to 2048), size 7953 sectors.
+    TEST_ESP_OK(gen_single_partition(mbr,
+                                     esp_ext_part_sector_count_to_bytes(8, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     esp_ext_part_sector_count_to_bytes(7953, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     ESP_EXT_PART_TYPE_FAT12, &args));
+
+    TEST_ASSERT_EQUAL_UINT32(2048, mbr->partition_table[0].lba_start);
+    TEST_ASSERT_EQUAL_UINT32(7953, mbr->partition_table[0].sector_count); // size unchanged
+    free(mbr);
+}
+
+// Test 1: PRESERVE_END (opt-in) - start aligned up, size shrunk so end == original end.
+TEST_CASE("Test align policy PRESERVE_END shrinks size to keep the end", "[esp_ext_part_table]")
+{
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+        .align_policy = ESP_EXT_PART_ALIGN_POLICY_PRESERVE_END,
+    };
+
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+
+    // Start at sector 8 => aligned to 2048. Original end (exclusive) = 8 + 7953 = 7961.
+    // New sector_count should be 7961 - 2048 = 5913.
+    TEST_ESP_OK(gen_single_partition(mbr,
+                                     esp_ext_part_sector_count_to_bytes(8, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     esp_ext_part_sector_count_to_bytes(7953, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     ESP_EXT_PART_TYPE_FAT12, &args));
+
+    TEST_ASSERT_EQUAL_UINT32(2048, mbr->partition_table[0].lba_start);
+    TEST_ASSERT_EQUAL_UINT32(5913, mbr->partition_table[0].sector_count);
+    // End preserved:
+    TEST_ASSERT_EQUAL_UINT32(7961, mbr->partition_table[0].lba_start + mbr->partition_table[0].sector_count);
+    free(mbr);
+}
+
+// Test 2: PRESERVE_END - alignment consumes the whole partition -> error.
+TEST_CASE("Test align policy PRESERVE_END errors when alignment eats the partition", "[esp_ext_part_table]")
+{
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+        .align_policy = ESP_EXT_PART_ALIGN_POLICY_PRESERVE_END,
+    };
+
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+
+    // Start at sector 8 => aligned up to 2048, but size is only 10 sectors (end = 18 < 2048).
+    esp_err_t err = gen_single_partition(mbr,
+                                         esp_ext_part_sector_count_to_bytes(8, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                         esp_ext_part_sector_count_to_bytes(10, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                         ESP_EXT_PART_TYPE_FAT12, &args);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, err);
+    free(mbr);
+}
+
+// Test 3 & 4: REJECT policy.
+TEST_CASE("Test align policy REJECT errors on unaligned start, ok when aligned", "[esp_ext_part_table]")
+{
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+        .align_policy = ESP_EXT_PART_ALIGN_POLICY_REJECT,
+    };
+
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+
+    // Unaligned start (sector 8) -> error.
+    esp_err_t err = gen_single_partition(mbr,
+                                         esp_ext_part_sector_count_to_bytes(8, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                         esp_ext_part_sector_count_to_bytes(7953, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                         ESP_EXT_PART_TYPE_FAT12, &args);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, err);
+
+    // Pre-aligned start (sector 2048) -> ok, unchanged.
+    memset(mbr, 0, sizeof(mbr_t));
+    TEST_ESP_OK(gen_single_partition(mbr,
+                                     esp_ext_part_sector_count_to_bytes(2048, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     esp_ext_part_sector_count_to_bytes(7953, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     ESP_EXT_PART_TYPE_FAT12, &args));
+    TEST_ASSERT_EQUAL_UINT32(2048, mbr->partition_table[0].lba_start);
+    TEST_ASSERT_EQUAL_UINT32(7953, mbr->partition_table[0].sector_count);
+    free(mbr);
+}
+
+// Test 6: ALIGN_NONE performs no relocation.
+TEST_CASE("Test ALIGN_NONE leaves the start untouched", "[esp_ext_part_table]")
+{
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_NONE,
+    };
+
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+
+    // Start at sector 8, no alignment -> lba_start stays 8.
+    TEST_ESP_OK(gen_single_partition(mbr,
+                                     esp_ext_part_sector_count_to_bytes(8, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     esp_ext_part_sector_count_to_bytes(100, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     ESP_EXT_PART_TYPE_FAT12, &args));
+    TEST_ASSERT_EQUAL_UINT32(8, mbr->partition_table[0].lba_start);
+    TEST_ASSERT_EQUAL_UINT32(100, mbr->partition_table[0].sector_count);
+    free(mbr);
+}
+
+// Test 7: ALIGN_AUTO (and zero-initialized alignment) applies the 1 MiB default.
+TEST_CASE("Test ALIGN_AUTO applies the 1MiB default alignment", "[esp_ext_part_table]")
+{
+    // Explicit AUTO
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_AUTO,
+    };
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    TEST_ESP_OK(gen_single_partition(mbr,
+                                     esp_ext_part_sector_count_to_bytes(8, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     esp_ext_part_sector_count_to_bytes(100, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     ESP_EXT_PART_TYPE_FAT12, &args));
+    TEST_ASSERT_EQUAL_UINT32(2048, mbr->partition_table[0].lba_start); // aligned to 1 MiB
+    free(mbr);
+
+    // Zero-initialized alignment field must also select AUTO (=> 1 MiB), not NONE.
+    esp_mbr_generate_extra_args_t args0 = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+    };
+    mbr_t *mbr2 = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr2);
+    TEST_ESP_OK(gen_single_partition(mbr2,
+                                     esp_ext_part_sector_count_to_bytes(8, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     esp_ext_part_sector_count_to_bytes(100, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     ESP_EXT_PART_TYPE_FAT12, &args0));
+    TEST_ASSERT_EQUAL_UINT32(2048, mbr2->partition_table[0].lba_start);
+    free(mbr2);
+}
+
+// Test 8 & 9: overlap detection and disabling it.
+TEST_CASE("Test overlapping partitions are rejected unless the check is disabled", "[esp_ext_part_table]")
+{
+    esp_ext_part_list_t part_list = {0};
+    // Two partitions that overlap: p0 = [2048, 2048+4096), p1 starts at 4096 (< 6144) with NONE alignment.
+    esp_ext_part_list_item_t item1 = {
+        .info = {
+            .address = esp_ext_part_sector_count_to_bytes(2048, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .size = esp_ext_part_sector_count_to_bytes(4096, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .type = ESP_EXT_PART_TYPE_FAT12,
+        }
+    };
+    esp_ext_part_list_item_t item2 = {
+        .info = {
+            .address = esp_ext_part_sector_count_to_bytes(4096, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .size = esp_ext_part_sector_count_to_bytes(4096, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .type = ESP_EXT_PART_TYPE_FAT12,
+        }
+    };
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &item1));
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &item2));
+
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+
+    // With overlap check on (default) and NONE alignment -> overlap error.
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_NONE,
+    };
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, esp_mbr_generate(mbr, &part_list, &args));
+
+    // With overlap check disabled -> ok.
+    memset(mbr, 0, sizeof(mbr_t));
+    args.disable_overlap_check = true;
+    TEST_ESP_OK(esp_mbr_generate(mbr, &part_list, &args));
+
+    free(mbr);
+    TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
+}
+
+// Test 10 & 11: disk-bounds (total_size) check.
+TEST_CASE("Test total_size bounds check rejects off-disk partitions", "[esp_ext_part_table]")
+{
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+
+    // Partition ends at sector 2048+100 = 2148 (= 1099776 bytes). Set total_size just below that.
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+        .total_size = esp_ext_part_sector_count_to_bytes(2000, ESP_EXT_PART_SECTOR_SIZE_512B), // too small
+    };
+    esp_err_t err = gen_single_partition(mbr,
+                                         esp_ext_part_sector_count_to_bytes(8, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                         esp_ext_part_sector_count_to_bytes(100, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                         ESP_EXT_PART_TYPE_FAT12, &args);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, err);
+
+    // total_size large enough -> ok.
+    memset(mbr, 0, sizeof(mbr_t));
+    args.total_size = esp_ext_part_sector_count_to_bytes(4096, ESP_EXT_PART_SECTOR_SIZE_512B);
+    TEST_ESP_OK(gen_single_partition(mbr,
+                                     esp_ext_part_sector_count_to_bytes(8, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     esp_ext_part_sector_count_to_bytes(100, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     ESP_EXT_PART_TYPE_FAT12, &args));
+
+    // total_size == 0 -> check skipped even for a huge partition.
+    memset(mbr, 0, sizeof(mbr_t));
+    args.total_size = 0;
+    TEST_ESP_OK(gen_single_partition(mbr,
+                                     esp_ext_part_sector_count_to_bytes(8, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     esp_ext_part_sector_count_to_bytes(100, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     ESP_EXT_PART_TYPE_FAT12, &args));
+    free(mbr);
 }
 
 #if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
@@ -504,6 +767,13 @@ TEST_CASE("Test with BDL (simulated in RAM) - MBR related", "[esp_ext_part_table
     TEST_ESP_OK(err);
     TEST_ASSERT_NOT_NULL(handle);
 
+    // The backing buffer is intentionally tiny (one MBR sector) to stay within
+    // limited on-target RAM, but the MBR we write declares partitions at high LBAs.
+    // Report a realistic disk size so those partitions are within-bounds for the
+    // new bdl_write disk-bounds validation. Only the MBR sector (offset 0) is ever
+    // actually read/written, so the small backing buffer is never over-indexed.
+    handle->geometry.disk_size = 40 * 1024 * 1024; // 40 MiB (reported only, no allocation)
+
     err = handle->ops->write(handle, mbr_bin, 0, mbr_bin_len);
     TEST_ESP_OK(err);
 
@@ -551,6 +821,22 @@ TEST_CASE("Test with BDL (simulated in RAM) - MBR related", "[esp_ext_part_table
     printf("Partition list after writing new partition to BDL simulated MBR:\n");
     print_esp_ext_part_list_items(it);
     fflush(stdout);
+
+    // Negative case: prove the disk-bounds validation fires through the BDL write
+    // path. bdl_write auto-fills total_size from handle->geometry.disk_size (40 MiB
+    // reported above) when the caller leaves it 0, so a partition placed past the
+    // end of the (reported) disk must be rejected with ESP_ERR_INVALID_SIZE.
+    // This is a pure arithmetic check - it does not allocate a 40 MiB buffer.
+    esp_ext_part_list_item_t off_disk_partition = {
+        .info = {
+            .address = 50 * 1024 * 1024, // 50 MiB offset - beyond the 40 MiB reported disk
+            .size = 1 * 1024 * 1024,
+            .type = ESP_EXT_PART_TYPE_FAT12,
+        }
+    };
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &off_disk_partition));
+    err = esp_ext_part_list_bdl_write(handle, &part_list, ESP_EXT_PART_LIST_SIGNATURE_MBR, (void *) &mbr_gen_args);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, err);
 
     TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
 }

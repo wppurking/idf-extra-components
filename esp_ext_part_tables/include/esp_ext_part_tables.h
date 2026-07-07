@@ -34,10 +34,20 @@ typedef enum {
 } esp_ext_part_sector_size_t;
 
 typedef enum {
-    ESP_EXT_PART_ALIGN_NONE = 0, // No alignment
+    ESP_EXT_PART_ALIGN_AUTO = 0, // Use the library default alignment (1 MiB). This is what a zero-initialized extra_args selects.
     ESP_EXT_PART_ALIGN_4KiB = 4096, // 4 KiB alignment
     ESP_EXT_PART_ALIGN_1MiB = (1024 * 1024), // 1 MiB alignment
+    ESP_EXT_PART_ALIGN_NONE = UINT32_MAX, // Explicitly perform no alignment (leave LBAs untouched)
 } esp_ext_part_align_t;
+
+typedef enum {
+    /*!< Default: align the partition start up, keep the requested size as the length from the aligned start (matches fdisk/parted behavior). */
+    ESP_EXT_PART_ALIGN_POLICY_KEEP_SIZE = 0,
+    /*!< Return an error if a partition start was not already aligned (do not silently relocate it). */
+    ESP_EXT_PART_ALIGN_POLICY_REJECT,
+    /*!< Align the partition start up, then shrink the size so the end stays at the originally requested address + size. Errors if alignment consumes the whole partition. */
+    ESP_EXT_PART_ALIGN_POLICY_PRESERVE_END,
+} esp_ext_part_align_policy_t;
 
 typedef enum __attribute__((packed))
 {
