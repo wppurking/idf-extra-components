@@ -226,7 +226,7 @@ esp_err_t esp_ext_part_list_signature_set(esp_ext_part_list_t *part_list, const 
 
 #if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
 /**
- * @brief Read a aprtition table and from a block device handle and parse it.
+ * @brief Read a partition table from a block device handle and parse it.
  *
  * This function reads the partition table from the specified block device and populates the provided partition list structure.
  * The type of partition table to read is specified by the 'type' parameter.

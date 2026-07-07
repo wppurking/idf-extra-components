@@ -56,12 +56,9 @@ esp_ext_part_list_item_t* item;
 item = esp_ext_part_list_item_head(&part_list); // Get the first partition
 
 for (int i = 0; item != NULL; i++) {
-    printf("Partition %d:\n
-        address: %" PRIu64 "\n
-        size: %" PRIu64 "\n
-        type: %" PRIu32 "\n,
-        label: %s\n",
-    i, item->info.address, item->info.size, (uint32_t) item->info.type, item->label ? item->label : ""); // item->info.type is of `esp_ext_part_type_known_t` enum type
+    printf("Partition %d:\n\taddress: %" PRIu64 "\n\tsize: %" PRIu64 "\n\ttype: %" PRIu32 "\n\tlabel: %s\n",
+           i, item->info.address, item->info.size, (uint32_t) item->info.type,
+           item->info.label ? item->info.label : ""); // item->info.type is of `esp_ext_part_type_known_t` enum type
 
     item = esp_ext_part_list_item_next(item); // Get the next partition
 }

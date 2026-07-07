@@ -58,7 +58,7 @@ uint32_t esp_mbr_lba_align(uint32_t lba, esp_ext_part_sector_size_t sector_size,
 /**
  * @brief Generate default supported MBR partition types for a given internal type.
  *
- * @param[in] type Internal artition type to generate supported types from internal `esp_ext_part_type_known_t` enum.
+ * @param[in] type Internal partition type to generate supported types from internal `esp_ext_part_type_known_t` enum.
  * @return MBR partition type code.
  */
 uint8_t esp_mbr_generate_default_supported_partition_types(uint8_t type);
