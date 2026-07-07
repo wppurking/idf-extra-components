@@ -214,6 +214,17 @@ esp_err_t esp_mbr_partition_set(mbr_t *mbr, uint8_t partition_index, esp_ext_par
         }
     }
 
+    // The exclusive end LBA (start + count) must also fit in the 32-bit MBR fields.
+    // Checking start and count individually (above) is not enough - their sum can
+    // still exceed UINT32_MAX. Compute it in 64-bit and reject if it overflows;
+    // this also prevents the auto-placement cursor (lba_start + sector_count) from
+    // wrapping in esp_mbr_generate.
+    if ((uint64_t) aligned_start + sector_count > (uint64_t) UINT32_MAX) {
+        ESP_LOGE(TAG, "Partition end (sector %" PRIu64 ") exceeds 32-bit limit of MBR",
+                 (uint64_t) aligned_start + sector_count);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
     partition->lba_start = aligned_start;
     partition->sector_count = (uint32_t) sector_count;
     partition->type = f_generate_supported_partition_types(item->info.type);
@@ -287,9 +298,13 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
     }
 
     // Total disk size in sectors (used both for auto-fill/FILL and the bounds check).
+    // Use FLOOR division here: this is a device capacity, so a trailing partial sector
+    // (when total_size is not a whole multiple of sector_size) is not usable and must
+    // not be counted - otherwise a FILL/bounds check could place a partition up to one
+    // sector past the real end of the disk.
     uint64_t total_sectors = 0;
-    if (args.total_size != 0) {
-        total_sectors = esp_ext_part_bytes_to_sector_count(args.total_size, args.sector_size);
+    if (args.total_size != 0 && args.sector_size != ESP_EXT_PART_SECTOR_SIZE_UNKNOWN) {
+        total_sectors = args.total_size / (uint64_t) args.sector_size;
     }
 
     esp_ext_part_list_item_t *it = NULL;
@@ -317,6 +332,17 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
                 ESP_LOGW(TAG, "Empty partition (ESP_EXT_PART_TYPE_NONE) in list at index %d will be skipped (no MBR entry written)", i);
             }
             continue; // Skip: do not write a slot, do not advance i / next_free_lba
+        }
+
+        // FILL without AUTO_ADDRESS has no effect (FILL is only resolved inside the
+        // AUTO_ADDRESS block). Reject the case where size is also 0; that combination
+        // would silently produce a zero-sector entry.
+        if ((it->info.flags & ESP_EXT_PART_FLAG_FILL) && !(it->info.flags & ESP_EXT_PART_FLAG_AUTO_ADDRESS)) {
+            if (it->info.size == 0) {
+                ESP_LOGE(TAG, "Partition %d has FILL flag without AUTO_ADDRESS and size 0; this would write a zero-size partition", i);
+                return ESP_ERR_INVALID_ARG;
+            }
+            ESP_LOGW(TAG, "Partition %d has FILL flag without AUTO_ADDRESS; FILL has no effect", i);
         }
 
         // Work on a shallow copy so the caller's list items are never mutated.

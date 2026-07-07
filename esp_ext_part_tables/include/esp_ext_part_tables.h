@@ -37,7 +37,7 @@ typedef enum {
     ESP_EXT_PART_ALIGN_AUTO = 0, // Use the library default alignment (1 MiB). This is what a zero-initialized extra_args selects.
     ESP_EXT_PART_ALIGN_4KiB = 4096, // 4 KiB alignment
     ESP_EXT_PART_ALIGN_1MiB = (1024 * 1024), // 1 MiB alignment
-    ESP_EXT_PART_ALIGN_NONE = UINT32_MAX, // Explicitly perform no alignment (leave LBAs untouched)
+    ESP_EXT_PART_ALIGN_NONE = -1, // Explicitly perform no alignment (leave LBAs untouched). A representable-in-int sentinel (not a real alignment value).
 } esp_ext_part_align_t;
 
 typedef enum {
@@ -102,7 +102,7 @@ typedef struct {
     esp_ext_part_list_signature_t signature; /*!< Disk signature or identifier */
     SLIST_HEAD(esp_ext_part_list_head_, esp_ext_part_list_item_) head; /*!< Head of the partition list */
     esp_ext_part_list_flags_t flags; /*!< Flags for the partition list */
-    esp_ext_part_sector_size_t sector_size; /*!< Sector size (storage medium property) */
+    esp_ext_part_sector_size_t sector_size; /*!< Sector size (storage medium property). `esp_mbr_parse` sets this from the parsed medium. For a freshly built list you may set it directly (e.g. `list.sector_size = ESP_EXT_PART_SECTOR_SIZE_4KiB;`); `esp_mbr_generate` uses it as the default sector size, unless overridden by `esp_mbr_generate_extra_args_t::sector_size`. Left `ESP_EXT_PART_SECTOR_SIZE_UNKNOWN` (0) it defaults to 512 B. */
 } esp_ext_part_list_t;
 
 /**

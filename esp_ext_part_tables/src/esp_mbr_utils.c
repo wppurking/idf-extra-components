@@ -75,7 +75,13 @@ uint32_t esp_mbr_lba_align(uint32_t lba, esp_ext_part_sector_size_t sector_size,
     if (remainder == 0) {
         return lba; // Already aligned
     }
-    return lba + (alignment_sectors - remainder);
+    uint32_t to_add = alignment_sectors - remainder;
+    // Guard against uint32_t overflow at the very top of the MBR address space.
+    // Saturate to UINT32_MAX; the caller's bounds check will reject this as needed.
+    if (lba > UINT32_MAX - to_add) {
+        return UINT32_MAX;
+    }
+    return lba + to_add;
 }
 
 static bool default_known_supported_partition_types(uint8_t type, esp_ext_part_type_known_t *out_type_parsed)

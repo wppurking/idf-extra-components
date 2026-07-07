@@ -79,7 +79,7 @@ typedef struct {
     // enums, then bools). Zero-initialization ({0}) still selects all defaults.
     uint64_t total_size; // Total device size in bytes for the "fits within disk" check; 0 disables the check. The BDL write helper auto-fills this from the device geometry when left 0.
     uint8_t (*esp_mbr_generate_custom_supported_partition_types)(uint8_t); // Custom function for generating supported MBR partition types, optional
-    esp_ext_part_sector_size_t sector_size; // Sector size hint for correct LBA alignment
+    esp_ext_part_sector_size_t sector_size; // Sector size for correct LBA alignment. Overrides the list's `sector_size` for this call; 0 (UNKNOWN) falls back to the list's value, then to 512 B.
     esp_ext_part_align_t alignment; // Alignment hint for correct LBA alignment
     esp_ext_part_align_policy_t align_policy; // Policy applied when alignment moves a partition start (default 0 = KEEP_SIZE)
     bool keep_signature; // If true, the disk signature will be preserved in the generated MBR and not overwritten with a random value

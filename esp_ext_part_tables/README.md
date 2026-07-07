@@ -18,6 +18,12 @@ When generating an MBR (`esp_mbr_generate` / `esp_ext_part_list_bdl_write`), the
 behavior is controlled through `esp_mbr_generate_extra_args_t` (a zero-initialized
 struct selects all defaults):
 
+The sector size used for all byte<->sector math comes from the partition list's
+`sector_size` field (set by `esp_mbr_parse`, or assigned directly on a freshly
+built list, e.g. `part_list.sector_size = ESP_EXT_PART_SECTOR_SIZE_4KiB;`). It can
+be overridden per call via `extra_args.sector_size`; if neither is set it defaults
+to 512 B.
+
 - `total_size`: when non-zero, partitions that extend past this many bytes are
   rejected. The block-device write helper auto-fills this from the device geometry
   when left `0`.

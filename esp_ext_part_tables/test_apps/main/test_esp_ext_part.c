@@ -623,6 +623,66 @@ TEST_CASE("Test total_size bounds check rejects off-disk partitions", "[esp_ext_
     free(mbr);
 }
 
+// total_size that is NOT a whole multiple of the sector size must be floored, not
+// ceiled: a trailing partial sector is not usable capacity. A partition that ends on
+// the last WHOLE sector is accepted; one that ends on the (non-existent) partial
+// sector beyond it must be rejected. With the old ceiling behavior the latter was
+// wrongly accepted (off-disk by up to one sector).
+TEST_CASE("Test total_size is floored to whole sectors", "[esp_ext_part_table]")
+{
+    // 100 whole 512 B sectors + 100 extra bytes -> floor = 100 sectors (usable),
+    // ceiling would have been 101.
+    const uint64_t total = (uint64_t) 100 * 512 + 100;
+
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_NONE, // keep the exact start, no rounding
+        .total_size = total,
+    };
+
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+
+    // Ends exactly at sector 100 (start 50 + 50): within the floored capacity -> OK.
+    TEST_ESP_OK(gen_single_partition(mbr,
+                                     esp_ext_part_sector_count_to_bytes(50, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     esp_ext_part_sector_count_to_bytes(50, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                     ESP_EXT_PART_TYPE_FAT12, &args));
+    TEST_ASSERT_EQUAL_UINT32(100, mbr->partition_table[0].lba_start + mbr->partition_table[0].sector_count);
+
+    // Ends at sector 101 (start 50 + 51): past the floored capacity of 100 -> rejected.
+    // (Ceiling would have made total_sectors 101 and wrongly accepted this.)
+    memset(mbr, 0, sizeof(mbr_t));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE,
+                      gen_single_partition(mbr,
+                                           esp_ext_part_sector_count_to_bytes(50, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                           esp_ext_part_sector_count_to_bytes(51, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                           ESP_EXT_PART_TYPE_FAT12, &args));
+    free(mbr);
+}
+
+// A partition whose start and count each fit in 32 bits but whose END (start + count)
+// exceeds UINT32_MAX must be rejected: the sum would overflow the 32-bit MBR fields
+// and wrap the auto-placement cursor. Use ALIGN_NONE so the start is not rounded.
+TEST_CASE("Test partition whose end exceeds the 32-bit MBR range is rejected", "[esp_ext_part_table]")
+{
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_NONE,
+    };
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+
+    // start = UINT32_MAX - 10 sectors, count = 20 sectors -> end = UINT32_MAX + 10 (overflow).
+    // Both start and count individually fit in 32 bits, but the end does not.
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_SUPPORTED,
+                      gen_single_partition(mbr,
+                                           esp_ext_part_sector_count_to_bytes((uint64_t) UINT32_MAX - 10, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                           esp_ext_part_sector_count_to_bytes(20, ESP_EXT_PART_SECTOR_SIZE_512B),
+                                           ESP_EXT_PART_TYPE_FAT12, &args));
+    free(mbr);
+}
+
 // esp_mbr_lba_align must round up correctly even when alignment / sector_size is
 // not a power of two. The defined enum values all happen to yield a power-of-two
 // number of sectors, but a caller may cast a custom alignment value, so the
@@ -650,6 +710,14 @@ TEST_CASE("Test esp_mbr_lba_align rounds up for non-power-of-two alignment", "[e
     // ESP_EXT_PART_ALIGN_NONE and a zero alignment leave the LBA untouched.
     TEST_ASSERT_EQUAL_UINT32(7, esp_mbr_lba_align(7, ESP_EXT_PART_SECTOR_SIZE_512B, ESP_EXT_PART_ALIGN_NONE));
     TEST_ASSERT_EQUAL_UINT32(7, esp_mbr_lba_align(7, ESP_EXT_PART_SECTOR_SIZE_512B, (esp_ext_part_align_t) 0));
+
+    // Overflow guard: aligning an LBA that is already within one alignment_sectors
+    // of UINT32_MAX must not wrap; the saturated result is UINT32_MAX.
+    // alignment_sectors = 2048 (1 MiB / 512 B); last aligned LBA below UINT32_MAX is
+    // 0xFFFFF800 (= 4294965248). The next LBA after that would overflow, so
+    // esp_mbr_lba_align must return UINT32_MAX instead.
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, esp_mbr_lba_align(0xFFFFF801, ESP_EXT_PART_SECTOR_SIZE_512B, ESP_EXT_PART_ALIGN_1MiB));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, esp_mbr_lba_align(UINT32_MAX,  ESP_EXT_PART_SECTOR_SIZE_512B, ESP_EXT_PART_ALIGN_1MiB));
 }
 
 // ---------------------------------------------------------------------------
@@ -837,6 +905,32 @@ TEST_CASE("Test auto-placement: caller items are not mutated", "[esp_ext_part_ta
     TEST_ASSERT_NOT_NULL(stored);
     TEST_ASSERT_EQUAL_UINT64(0, stored->info.address);
     TEST_ASSERT_TRUE(stored->info.flags & ESP_EXT_PART_FLAG_AUTO_ADDRESS);
+    free(mbr);
+    TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
+}
+
+// FILL without AUTO_ADDRESS + size 0 must be rejected (it would silently produce a
+// zero-sector entry). FILL without AUTO_ADDRESS + non-zero size is allowed (with a
+// warning) since the non-zero size still produces a valid entry.
+TEST_CASE("Test FILL without AUTO_ADDRESS: size 0 is rejected", "[esp_ext_part_table]")
+{
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+    };
+    esp_ext_part_list_t part_list = {0};
+    esp_ext_part_list_item_t item = {
+        .info = {
+            .address = esp_ext_part_sector_count_to_bytes(2048, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .size = 0, // size 0 + FILL but no AUTO_ADDRESS -> error
+            .type = ESP_EXT_PART_TYPE_FAT12,
+            .flags = ESP_EXT_PART_FLAG_FILL,
+        }
+    };
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &item));
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, esp_mbr_generate(mbr, &part_list, &args));
     free(mbr);
     TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
 }
