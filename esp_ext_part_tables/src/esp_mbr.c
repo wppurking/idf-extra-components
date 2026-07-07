@@ -235,13 +235,15 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
     esp_err_t err = ESP_OK;
 
     // Set default arguments for MBR generation
+    // (initializer follows the struct's member order)
     esp_mbr_generate_extra_args_t args = {
+        .total_size = 0, // Default: no "fits within disk" check
         .sector_size = part_list->sector_size != ESP_EXT_PART_SECTOR_SIZE_UNKNOWN ? part_list->sector_size : ESP_EXT_PART_SECTOR_SIZE_512B, // Default sector size
         .alignment = ESP_EXT_PART_ALIGN_AUTO, // Resolved to the default (1 MiB) below unless overridden
-        .keep_signature = false, // Default is to generate a new disk signature
         .align_policy = ESP_EXT_PART_ALIGN_POLICY_KEEP_SIZE, // Default: keep the requested size (current behavior)
+        .keep_signature = false, // Default is to generate a new disk signature
         .disable_overlap_check = false, // Default: reject overlapping partitions
-        .total_size = 0, // Default: no "fits within disk" check
+        .allow_empty_partitions = false, // Default: reject ESP_EXT_PART_TYPE_NONE items (they would create a gap)
     };
 
     // Load extra arguments if provided
@@ -260,6 +262,7 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
         args.align_policy = extra_args->align_policy;
         args.disable_overlap_check = extra_args->disable_overlap_check;
         args.total_size = extra_args->total_size;
+        args.allow_empty_partitions = extra_args->allow_empty_partitions;
     }
 
     // Resolve ESP_EXT_PART_ALIGN_AUTO to the library default alignment (1 MiB)
@@ -299,6 +302,21 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
         if (i >= MBR_MAX_PARTITION_COUNT) {
             ESP_LOGW(TAG, "More than %d partitions in the list, only the first %d will be added to the MBR", MBR_MAX_PARTITION_COUNT, MBR_MAX_PARTITION_COUNT);
             break; // MBR can only hold 4 partitions
+        }
+
+        // An empty (ESP_EXT_PART_TYPE_NONE) item cannot be written as a partition
+        // entry: doing so would leave a zeroed slot in the middle of the table,
+        // which esp_mbr_parse stops at (silently dropping later partitions) and
+        // which resets the auto-placement cursor. Reject it by default; only skip
+        // it (without consuming a slot or advancing the cursor) if explicitly allowed.
+        if (it->info.type == ESP_EXT_PART_TYPE_NONE) {
+            if (!args.allow_empty_partitions) {
+                ESP_LOGE(TAG, "Empty partition (ESP_EXT_PART_TYPE_NONE) in list would create a gap; set allow_empty_partitions to skip it");
+                return ESP_ERR_INVALID_ARG;
+            } else {
+                ESP_LOGW(TAG, "Empty partition (ESP_EXT_PART_TYPE_NONE) in list at index %d will be skipped (no MBR entry written)", i);
+            }
+            continue; // Skip: do not write a slot, do not advance i / next_free_lba
         }
 
         // Work on a shallow copy so the caller's list items are never mutated.

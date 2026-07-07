@@ -15,8 +15,12 @@ Currently only [MBR (Master boot record)](https://en.wikipedia.org/wiki/Master_b
 ## Alignment and layout validation (MBR generation)
 
 When generating an MBR (`esp_mbr_generate` / `esp_ext_part_list_bdl_write`), the
-behavior is controlled through `esp_mbr_generate_extra_args_t`:
+behavior is controlled through `esp_mbr_generate_extra_args_t` (a zero-initialized
+struct selects all defaults):
 
+- `total_size`: when non-zero, partitions that extend past this many bytes are
+  rejected. The block-device write helper auto-fills this from the device geometry
+  when left `0`.
 - `alignment`: partition start alignment. `ESP_EXT_PART_ALIGN_AUTO` (the value a
   zero-initialized struct selects) resolves to a 1 MiB default;
   `ESP_EXT_PART_ALIGN_NONE` leaves start LBAs untouched; `ESP_EXT_PART_ALIGN_4KiB`
@@ -29,9 +33,9 @@ behavior is controlled through `esp_mbr_generate_extra_args_t`:
   stays at the originally requested `address + size`.
 - `disable_overlap_check`: overlapping partitions are rejected by default; set
   this to skip the check.
-- `total_size`: when non-zero, partitions that extend past this many bytes are
-  rejected. The block-device write helper auto-fills this from the device geometry
-  when left `0`.
+- `allow_empty_partitions`: a list item with type `ESP_EXT_PART_TYPE_NONE` would
+  create a gap in the partition table (which truncates the parsed result). By
+  default such an item is rejected; set this to skip it instead.
 
 ## Automatic partition placement (MBR generation)
 

@@ -75,13 +75,16 @@ typedef struct {
 } esp_mbr_parse_extra_args_t;
 
 typedef struct {
+    // Members are ordered to minimize struct padding (8-byte fields, then 4-byte
+    // enums, then bools). Zero-initialization ({0}) still selects all defaults.
+    uint64_t total_size; // Total device size in bytes for the "fits within disk" check; 0 disables the check. The BDL write helper auto-fills this from the device geometry when left 0.
+    uint8_t (*esp_mbr_generate_custom_supported_partition_types)(uint8_t); // Custom function for generating supported MBR partition types, optional
     esp_ext_part_sector_size_t sector_size; // Sector size hint for correct LBA alignment
     esp_ext_part_align_t alignment; // Alignment hint for correct LBA alignment
-    bool keep_signature; // If true, the disk signature will be preserved in the generated MBR and not overwritten with a random value
-    uint8_t (*esp_mbr_generate_custom_supported_partition_types)(uint8_t); // Custom function for generating supported MBR partition types, optional
     esp_ext_part_align_policy_t align_policy; // Policy applied when alignment moves a partition start (default 0 = KEEP_SIZE)
+    bool keep_signature; // If true, the disk signature will be preserved in the generated MBR and not overwritten with a random value
     bool disable_overlap_check; // If false (default), generation fails when two partitions overlap
-    uint64_t total_size; // Total device size in bytes for the "fits within disk" check; 0 disables the check. The BDL write helper auto-fills this from the device geometry when left 0.
+    bool allow_empty_partitions; // If false (default), a list item with type ESP_EXT_PART_TYPE_NONE is rejected (it would create a gap that truncates the parsed table). If true, such items are silently skipped instead.
 } esp_mbr_generate_extra_args_t;
 
 /**
@@ -141,6 +144,13 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
  *     `esp_mbr_partition_set` does not support it. The caller's partition list is not
  *     modified.
  *
+ * Empty list items:
+ *   - A list item with `type == ESP_EXT_PART_TYPE_NONE` cannot be encoded as a
+ *     partition entry without leaving a gap in the table (which truncates the parsed
+ *     result and disturbs auto-placement). By default such an item is rejected with
+ *     `ESP_ERR_INVALID_ARG`; set `extra_args->allow_empty_partitions` to skip it
+ *     instead (it then consumes no partition slot).
+ *
  * @note This function is not thread-safe.
  *
  * @param[out] mbr         Pointer to the blank MBR structure to be filled (must already be allocated and be at least `MBR_SIZE` bytes).
@@ -149,7 +159,7 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
  *
  * @return
  *     - ESP_OK:                Generation was successful.
- *     - ESP_ERR_INVALID_ARG:   Invalid arguments were provided, a partition start was not aligned while `align_policy` is `ESP_EXT_PART_ALIGN_POLICY_REJECT`, or an AUTO_ADDRESS partition has size 0 without the FILL flag.
+ *     - ESP_ERR_INVALID_ARG:   Invalid arguments were provided, a partition start was not aligned while `align_policy` is `ESP_EXT_PART_ALIGN_POLICY_REJECT`, an AUTO_ADDRESS partition has size 0 without the FILL flag, or a list item has type `ESP_EXT_PART_TYPE_NONE` while `allow_empty_partitions` is false.
  *     - ESP_ERR_INVALID_STATE: Error filling a partition entry, or two partitions overlap.
  *     - ESP_ERR_INVALID_SIZE:  Alignment consumed a whole partition (PRESERVE_END policy), a partition runs past `total_size`, or a FILL partition cannot be sized (no/insufficient total size).
  *     - ESP_ERR_NOT_SUPPORTED: Partition address or size (sector count) exceeds 32-bit limit of MBR.
