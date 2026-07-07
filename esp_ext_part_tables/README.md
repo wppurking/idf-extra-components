@@ -33,6 +33,43 @@ behavior is controlled through `esp_mbr_generate_extra_args_t`:
   rejected. The block-device write helper auto-fills this from the device geometry
   when left `0`.
 
+## Automatic partition placement (MBR generation)
+
+Instead of computing every start address by hand, a partition can be placed
+automatically by setting flags on `esp_ext_part_t.flags`:
+
+- `ESP_EXT_PART_FLAG_AUTO_ADDRESS`: the library computes the partition's start,
+  placing it right after the previous partition and aligning it. `info.address` is
+  ignored. The first auto-placed partition lands on the first aligned LBA (after
+  the MBR sector).
+- `ESP_EXT_PART_FLAG_FILL` (with `AUTO_ADDRESS` and `info.size == 0`): the
+  partition is sized to fill from its computed start to the end of the disk. This
+  needs a known disk size - either `extra_args->total_size`, or (via
+  `esp_ext_part_list_bdl_write`) the block device geometry.
+
+The caller's partition list is never modified; addresses/sizes are resolved into
+internal copies during generation.
+
+```c
+// First partition: auto-placed, fixed size. Last partition: auto-placed, fills the rest.
+esp_ext_part_list_item_t p0 = {
+    .info = {
+        .size = 16 * 1024 * 1024, // 16 MiB
+        .type = ESP_EXT_PART_TYPE_FAT32,
+        .flags = ESP_EXT_PART_FLAG_AUTO_ADDRESS,
+    }
+};
+esp_ext_part_list_item_t p1 = {
+    .info = {
+        .size = 0, // filled to the end of the disk
+        .type = ESP_EXT_PART_TYPE_LITTLEFS,
+        .extra = 4096,
+        .flags = ESP_EXT_PART_FLAG_AUTO_ADDRESS | ESP_EXT_PART_FLAG_FILL | ESP_EXT_PART_FLAG_EXTRA,
+    }
+};
+// esp_ext_part_list_insert(&part_list, &p0/&p1); then esp_ext_part_list_bdl_write(...)
+```
+
 ## Example code
 
 ```c

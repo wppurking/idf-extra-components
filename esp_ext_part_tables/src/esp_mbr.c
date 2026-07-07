@@ -283,28 +283,66 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
         mbr->copy_protected = MBR_COPY_PROTECTED;
     }
 
-    esp_ext_part_list_item_t *it = NULL;
-    int i = 0;
-    SLIST_FOREACH(it, &part_list->head, next) {
-        if (i >= MBR_MAX_PARTITION_COUNT) {
-            ESP_LOGW(TAG, "More than %d partitions in the list, only the first %d will be added to the MBR", MBR_MAX_PARTITION_COUNT, MBR_MAX_PARTITION_COUNT);
-            break; // MBR can only hold 4 partitions
-        }
-        err = esp_mbr_partition_set(mbr, i, it, &args);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to set partition %d: %s", i, esp_err_to_name(err));
-            return err; // Error setting partition
-        }
-        i += 1;
-    }
-    int partition_count = i; // Number of partition entries actually written
-
-    // Validate the generated layout (using the final post-alignment LBA values).
+    // Total disk size in sectors (used both for auto-fill/FILL and the bounds check).
     uint64_t total_sectors = 0;
     if (args.total_size != 0) {
         total_sectors = esp_ext_part_bytes_to_sector_count(args.total_size, args.sector_size);
     }
 
+    esp_ext_part_list_item_t *it = NULL;
+    int i = 0;
+    // Running cursor for automatic placement (in sectors). Starts at 1 so the first
+    // auto-placed partition begins after the MBR sector (sector 0) and, once aligned,
+    // lands on the first aligned LBA (e.g. sector 2048 for 1 MiB / 512 B).
+    uint32_t next_free_lba = 1;
+    SLIST_FOREACH(it, &part_list->head, next) {
+        if (i >= MBR_MAX_PARTITION_COUNT) {
+            ESP_LOGW(TAG, "More than %d partitions in the list, only the first %d will be added to the MBR", MBR_MAX_PARTITION_COUNT, MBR_MAX_PARTITION_COUNT);
+            break; // MBR can only hold 4 partitions
+        }
+
+        // Work on a shallow copy so the caller's list items are never mutated.
+        esp_ext_part_list_item_t local = *it;
+
+        if (it->info.flags & ESP_EXT_PART_FLAG_AUTO_ADDRESS) {
+            // Compute an aligned start placed after the previous entry.
+            uint32_t start_lba = esp_mbr_lba_align(next_free_lba, args.sector_size, args.alignment);
+
+            uint64_t size_sectors;
+            if (it->info.size == 0) {
+                if (!(it->info.flags & ESP_EXT_PART_FLAG_FILL)) {
+                    ESP_LOGE(TAG, "Partition %d has AUTO_ADDRESS and size 0 but no FILL flag", i);
+                    return ESP_ERR_INVALID_ARG;
+                }
+                if (total_sectors == 0 || (uint64_t) start_lba >= total_sectors) {
+                    ESP_LOGE(TAG, "Partition %d FILL cannot size to disk end (total sectors %" PRIu64 ", start %" PRIu32 ")",
+                             i, total_sectors, start_lba);
+                    return ESP_ERR_INVALID_SIZE;
+                }
+                size_sectors = total_sectors - (uint64_t) start_lba;
+            } else {
+                size_sectors = esp_ext_part_bytes_to_sector_count(it->info.size, args.sector_size);
+            }
+
+            // Feed a concrete, already-aligned address/size to esp_mbr_partition_set.
+            local.info.address = esp_ext_part_sector_count_to_bytes(start_lba, args.sector_size);
+            local.info.size = esp_ext_part_sector_count_to_bytes(size_sectors, args.sector_size);
+            local.info.flags &= ~(esp_ext_part_flags_t) ESP_EXT_PART_FLAG_AUTO_ADDRESS; // Now concrete
+        }
+
+        err = esp_mbr_partition_set(mbr, i, &local, &args);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set partition %d: %s", i, esp_err_to_name(err));
+            return err; // Error setting partition
+        }
+
+        // Advance the cursor from the entry actually written (post-alignment).
+        next_free_lba = mbr->partition_table[i].lba_start + mbr->partition_table[i].sector_count;
+        i += 1;
+    }
+    int partition_count = i; // Number of partition entries actually written
+
+    // Validate the generated layout (using the final post-alignment LBA values).
     for (int a = 0; a < partition_count; a++) {
         mbr_partition_t *pa = &mbr->partition_table[a];
         if (pa->type == 0x00) {

@@ -23,6 +23,7 @@
 
 #include "esp_ext_part_tables.h"
 #include "esp_mbr.h"
+#include "esp_mbr_utils.h"
 
 void setUp(void)
 {
@@ -622,6 +623,224 @@ TEST_CASE("Test total_size bounds check rejects off-disk partitions", "[esp_ext_
     free(mbr);
 }
 
+// esp_mbr_lba_align must round up correctly even when alignment / sector_size is
+// not a power of two. The defined enum values all happen to yield a power-of-two
+// number of sectors, but a caller may cast a custom alignment value, so the
+// rounding must not rely on the power-of-two bitmask idiom.
+TEST_CASE("Test esp_mbr_lba_align rounds up for non-power-of-two alignment", "[esp_ext_part_table]")
+{
+    // alignment = 1536 bytes, sector_size = 512 => alignment_sectors = 3 (not a power of two).
+    esp_ext_part_align_t align3 = (esp_ext_part_align_t) 1536;
+
+    // Already-aligned values stay put.
+    TEST_ASSERT_EQUAL_UINT32(0, esp_mbr_lba_align(0, ESP_EXT_PART_SECTOR_SIZE_512B, align3));
+    TEST_ASSERT_EQUAL_UINT32(3, esp_mbr_lba_align(3, ESP_EXT_PART_SECTOR_SIZE_512B, align3));
+    TEST_ASSERT_EQUAL_UINT32(6, esp_mbr_lba_align(6, ESP_EXT_PART_SECTOR_SIZE_512B, align3));
+
+    // Unaligned values round UP to the next multiple of 3.
+    TEST_ASSERT_EQUAL_UINT32(3, esp_mbr_lba_align(1, ESP_EXT_PART_SECTOR_SIZE_512B, align3));
+    TEST_ASSERT_EQUAL_UINT32(6, esp_mbr_lba_align(4, ESP_EXT_PART_SECTOR_SIZE_512B, align3));
+    TEST_ASSERT_EQUAL_UINT32(6, esp_mbr_lba_align(5, ESP_EXT_PART_SECTOR_SIZE_512B, align3));
+    TEST_ASSERT_EQUAL_UINT32(9, esp_mbr_lba_align(7, ESP_EXT_PART_SECTOR_SIZE_512B, align3));
+
+    // Sanity: a power-of-two combo (1 MiB / 512 = 2048) still works.
+    TEST_ASSERT_EQUAL_UINT32(2048, esp_mbr_lba_align(8, ESP_EXT_PART_SECTOR_SIZE_512B, ESP_EXT_PART_ALIGN_1MiB));
+    TEST_ASSERT_EQUAL_UINT32(2048, esp_mbr_lba_align(2048, ESP_EXT_PART_SECTOR_SIZE_512B, ESP_EXT_PART_ALIGN_1MiB));
+
+    // ESP_EXT_PART_ALIGN_NONE and a zero alignment leave the LBA untouched.
+    TEST_ASSERT_EQUAL_UINT32(7, esp_mbr_lba_align(7, ESP_EXT_PART_SECTOR_SIZE_512B, ESP_EXT_PART_ALIGN_NONE));
+    TEST_ASSERT_EQUAL_UINT32(7, esp_mbr_lba_align(7, ESP_EXT_PART_SECTOR_SIZE_512B, (esp_ext_part_align_t) 0));
+}
+
+// ---------------------------------------------------------------------------
+// Automatic partition placement (ESP_EXT_PART_FLAG_AUTO_ADDRESS / _FILL) tests
+// ---------------------------------------------------------------------------
+
+// Test 1: a single AUTO_ADDRESS partition (first in the list) lands at the first aligned LBA.
+TEST_CASE("Test auto-placement: first partition placed at first aligned LBA", "[esp_ext_part_table]")
+{
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+    };
+    esp_ext_part_list_t part_list = {0};
+    esp_ext_part_list_item_t item = {
+        .info = {
+            .size = esp_ext_part_sector_count_to_bytes(100, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .type = ESP_EXT_PART_TYPE_FAT12,
+            .flags = ESP_EXT_PART_FLAG_AUTO_ADDRESS,
+        }
+    };
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &item));
+
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    TEST_ESP_OK(esp_mbr_generate(mbr, &part_list, &args));
+
+    TEST_ASSERT_EQUAL_UINT32(2048, mbr->partition_table[0].lba_start); // first 1 MiB-aligned LBA
+    TEST_ASSERT_EQUAL_UINT32(100, mbr->partition_table[0].sector_count);
+    free(mbr);
+    TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
+}
+
+// Test 2 & 3: AUTO partitions chain contiguously after their predecessor (aligned).
+TEST_CASE("Test auto-placement: partitions chain after the previous one", "[esp_ext_part_table]")
+{
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+    };
+    esp_ext_part_list_t part_list = {0};
+
+    // p0 explicit at sector 2048, size 3000 sectors -> ends at 5048.
+    esp_ext_part_list_item_t p0 = {
+        .info = {
+            .address = esp_ext_part_sector_count_to_bytes(2048, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .size = esp_ext_part_sector_count_to_bytes(3000, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .type = ESP_EXT_PART_TYPE_FAT12,
+        }
+    };
+    // p1 AUTO, size 1000 -> placed at align_up(5048) = 6144.
+    esp_ext_part_list_item_t p1 = {
+        .info = {
+            .size = esp_ext_part_sector_count_to_bytes(1000, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .type = ESP_EXT_PART_TYPE_FAT12,
+            .flags = ESP_EXT_PART_FLAG_AUTO_ADDRESS,
+        }
+    };
+    // p2 AUTO, size 500 -> placed at align_up(6144+1000=7144) = 8192.
+    esp_ext_part_list_item_t p2 = {
+        .info = {
+            .size = esp_ext_part_sector_count_to_bytes(500, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .type = ESP_EXT_PART_TYPE_FAT12,
+            .flags = ESP_EXT_PART_FLAG_AUTO_ADDRESS,
+        }
+    };
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &p0));
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &p1));
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &p2));
+
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    TEST_ESP_OK(esp_mbr_generate(mbr, &part_list, &args));
+
+    TEST_ASSERT_EQUAL_UINT32(2048, mbr->partition_table[0].lba_start);
+    TEST_ASSERT_EQUAL_UINT32(6144, mbr->partition_table[1].lba_start);
+    TEST_ASSERT_EQUAL_UINT32(1000, mbr->partition_table[1].sector_count);
+    TEST_ASSERT_EQUAL_UINT32(8192, mbr->partition_table[2].lba_start);
+    TEST_ASSERT_EQUAL_UINT32(500, mbr->partition_table[2].sector_count);
+    free(mbr);
+    TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
+}
+
+// Test 5: AUTO + size==0 without FILL -> error.
+TEST_CASE("Test auto-placement: size 0 without FILL is rejected", "[esp_ext_part_table]")
+{
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+    };
+    esp_ext_part_list_t part_list = {0};
+    esp_ext_part_list_item_t item = {
+        .info = {
+            .size = 0,
+            .type = ESP_EXT_PART_TYPE_FAT12,
+            .flags = ESP_EXT_PART_FLAG_AUTO_ADDRESS,
+        }
+    };
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &item));
+
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, esp_mbr_generate(mbr, &part_list, &args));
+    free(mbr);
+    TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
+}
+
+// Test 6 & 7: FILL behavior.
+TEST_CASE("Test auto-placement: FILL sizes to the end of the disk", "[esp_ext_part_table]")
+{
+    esp_ext_part_list_t part_list = {0};
+    // p0 AUTO explicit-size 100 -> [2048, 2148). p1 AUTO + FILL -> [align_up(2148)=4096, total).
+    esp_ext_part_list_item_t p0 = {
+        .info = {
+            .size = esp_ext_part_sector_count_to_bytes(100, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .type = ESP_EXT_PART_TYPE_FAT12,
+            .flags = ESP_EXT_PART_FLAG_AUTO_ADDRESS,
+        }
+    };
+    esp_ext_part_list_item_t p1 = {
+        .info = {
+            .size = 0,
+            .type = ESP_EXT_PART_TYPE_FAT12,
+            .flags = ESP_EXT_PART_FLAG_AUTO_ADDRESS | ESP_EXT_PART_FLAG_FILL,
+        }
+    };
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &p0));
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &p1));
+
+    // total_size = 20000 sectors.
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+        .total_size = esp_ext_part_sector_count_to_bytes(20000, ESP_EXT_PART_SECTOR_SIZE_512B),
+    };
+
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    TEST_ESP_OK(esp_mbr_generate(mbr, &part_list, &args));
+
+    TEST_ASSERT_EQUAL_UINT32(4096, mbr->partition_table[1].lba_start);
+    // Fills to disk end: start + count == total_sectors (20000).
+    TEST_ASSERT_EQUAL_UINT32(20000, mbr->partition_table[1].lba_start + mbr->partition_table[1].sector_count);
+    free(mbr);
+    TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
+
+    // Test 7: FILL with no total_size -> error.
+    esp_ext_part_list_t pl2 = {0};
+    TEST_ESP_OK(esp_ext_part_list_insert(&pl2, &p1));
+    esp_mbr_generate_extra_args_t args_no_total = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+    };
+    mbr_t *mbr2 = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr2);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, esp_mbr_generate(mbr2, &pl2, &args_no_total));
+    free(mbr2);
+    TEST_ESP_OK(esp_ext_part_list_deinit(&pl2));
+}
+
+// Test 9: the caller's partition items are not mutated by generation.
+TEST_CASE("Test auto-placement: caller items are not mutated", "[esp_ext_part_table]")
+{
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+    };
+    esp_ext_part_list_t part_list = {0};
+    esp_ext_part_list_item_t item = {
+        .info = {
+            .address = 0,
+            .size = esp_ext_part_sector_count_to_bytes(100, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .type = ESP_EXT_PART_TYPE_FAT12,
+            .flags = ESP_EXT_PART_FLAG_AUTO_ADDRESS,
+        }
+    };
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &item));
+
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    TEST_ESP_OK(esp_mbr_generate(mbr, &part_list, &args));
+
+    // The list item must still have its original address (0) and AUTO flag set.
+    esp_ext_part_list_item_t *stored = esp_ext_part_list_item_head(&part_list);
+    TEST_ASSERT_NOT_NULL(stored);
+    TEST_ASSERT_EQUAL_UINT64(0, stored->info.address);
+    TEST_ASSERT_TRUE(stored->info.flags & ESP_EXT_PART_FLAG_AUTO_ADDRESS);
+    free(mbr);
+    TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
+}
+
 #if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
 #include "esp_blockdev.h"
 
@@ -839,6 +1058,57 @@ TEST_CASE("Test with BDL (simulated in RAM) - MBR related", "[esp_ext_part_table
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, err);
 
     TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
+}
+
+// Test 10: AUTO_ADDRESS + FILL through the BDL write path, with total_size
+// auto-filled from the device geometry (no explicit total_size passed).
+TEST_CASE("Test auto-placement: FILL via BDL uses device geometry", "[esp_ext_part_table]")
+{
+    const uint32_t sector_size = 512;
+    const uint64_t disk_sectors = 30000; // reported disk size in sectors
+
+    size_t buffer_size = 512; // tiny backing buffer; only the MBR sector is touched
+    uint8_t *buffer = (uint8_t *) malloc(buffer_size);
+    TEST_ASSERT_NOT_NULL(buffer);
+    esp_blockdev_handle_t handle = NULL;
+    TEST_ESP_OK(bdl_simulated_get_blockdev(buffer, buffer_size, &handle));
+    TEST_ASSERT_NOT_NULL(handle);
+    handle->geometry.disk_size = disk_sectors * sector_size; // realistic reported size
+
+    esp_ext_part_list_t part_list = {0};
+    esp_ext_part_list_item_t fill_part = {
+        .info = {
+            .size = 0,
+            .type = ESP_EXT_PART_TYPE_FAT12,
+            .flags = ESP_EXT_PART_FLAG_AUTO_ADDRESS | ESP_EXT_PART_FLAG_FILL,
+        }
+    };
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &fill_part));
+
+    // No total_size in args -> bdl_write auto-fills it from handle->geometry.disk_size.
+    esp_mbr_generate_extra_args_t mbr_gen_args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+    };
+    TEST_ESP_OK(esp_ext_part_list_bdl_write(handle, &part_list, ESP_EXT_PART_LIST_SIGNATURE_MBR, (void *) &mbr_gen_args));
+    TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
+
+    // Read the MBR back and confirm the FILL partition reaches the disk end.
+    esp_mbr_parse_extra_args_t mbr_parse_args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B
+    };
+    TEST_ESP_OK(esp_ext_part_list_bdl_read(handle, &part_list, ESP_EXT_PART_LIST_SIGNATURE_MBR, (void *) &mbr_parse_args));
+    esp_ext_part_list_item_t *it = esp_ext_part_list_item_head(&part_list);
+    TEST_ASSERT_NOT_NULL(it);
+
+    uint64_t start_sec = esp_ext_part_bytes_to_sector_count(it->info.address, ESP_EXT_PART_SECTOR_SIZE_512B);
+    uint64_t count_sec = esp_ext_part_bytes_to_sector_count(it->info.size, ESP_EXT_PART_SECTOR_SIZE_512B);
+    TEST_ASSERT_EQUAL_UINT32(2048, start_sec); // first aligned LBA
+    TEST_ASSERT_EQUAL_UINT64(disk_sectors, start_sec + count_sec); // fills to disk end
+
+    TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
+    handle->ops->release(handle);
+    free(buffer);
 }
 #endif // (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
 

@@ -66,6 +66,8 @@ typedef enum {
     ESP_EXT_PART_FLAG_NONE = 0,
     ESP_EXT_PART_FLAG_ACTIVE = 1 << 0,  /*!< Active / bootable partition */
     ESP_EXT_PART_FLAG_EXTRA = 1 << 1, /*!< Additional information stored in `extra` field (e.g. LittleFS block size stored in CHS hack) */
+    ESP_EXT_PART_FLAG_AUTO_ADDRESS = 1 << 2, /*!< During MBR generation, let the library compute the start address (placed after the previous partition, aligned). `info.address` is ignored. */
+    ESP_EXT_PART_FLAG_FILL = 1 << 3, /*!< During MBR generation, together with ESP_EXT_PART_FLAG_AUTO_ADDRESS and `info.size == 0`, size the partition to fill from its computed start to the end of the disk (requires a known total size). */
 } esp_ext_part_flags_t;
 
 typedef enum {

@@ -128,6 +128,19 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
  *   - When alignment moves a partition start, `extra_args->align_policy` decides
  *     what happens to the size (see `esp_ext_part_align_policy_t`).
  *
+ * Automatic placement:
+ *   - A partition item with `ESP_EXT_PART_FLAG_AUTO_ADDRESS` has its start address
+ *     computed by this function (placed after the previous entry, aligned); its
+ *     `info.address` is ignored. The first such partition is placed at the first
+ *     aligned LBA (after the MBR sector).
+ *   - With `ESP_EXT_PART_FLAG_FILL` and `info.size == 0`, the partition is sized to
+ *     fill from its computed start to the end of the disk; this requires
+ *     `extra_args->total_size` (or, via `esp_ext_part_list_bdl_write`, the device
+ *     geometry).
+ *   - Auto-placement is honored only here (and through `esp_ext_part_list_bdl_write`);
+ *     `esp_mbr_partition_set` does not support it. The caller's partition list is not
+ *     modified.
+ *
  * @note This function is not thread-safe.
  *
  * @param[out] mbr         Pointer to the blank MBR structure to be filled (must already be allocated and be at least `MBR_SIZE` bytes).
@@ -136,9 +149,9 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
  *
  * @return
  *     - ESP_OK:                Generation was successful.
- *     - ESP_ERR_INVALID_ARG:   Invalid arguments were provided, or a partition start was not aligned while `align_policy` is `ESP_EXT_PART_ALIGN_POLICY_REJECT`.
+ *     - ESP_ERR_INVALID_ARG:   Invalid arguments were provided, a partition start was not aligned while `align_policy` is `ESP_EXT_PART_ALIGN_POLICY_REJECT`, or an AUTO_ADDRESS partition has size 0 without the FILL flag.
  *     - ESP_ERR_INVALID_STATE: Error filling a partition entry, or two partitions overlap.
- *     - ESP_ERR_INVALID_SIZE:  Alignment consumed a whole partition (PRESERVE_END policy), or a partition runs past `total_size`.
+ *     - ESP_ERR_INVALID_SIZE:  Alignment consumed a whole partition (PRESERVE_END policy), a partition runs past `total_size`, or a FILL partition cannot be sized (no/insufficient total size).
  *     - ESP_ERR_NOT_SUPPORTED: Partition address or size (sector count) exceeds 32-bit limit of MBR.
  *     - Other error codes from `esp_ext_part_list_signature_get` or `esp_mbr_partition_set`.
  */

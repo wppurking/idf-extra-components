@@ -65,8 +65,17 @@ uint32_t esp_mbr_lba_align(uint32_t lba, esp_ext_part_sector_size_t sector_size,
     if (sector_size == 0 || alignment == 0 || alignment == ESP_EXT_PART_ALIGN_NONE) {
         return lba; // No alignment
     }
-    uint32_t alignment_sectors = alignment / sector_size;
-    return (lba + alignment_sectors - 1) & ~(alignment_sectors - 1);
+    uint32_t alignment_sectors = (uint32_t) alignment / (uint32_t) sector_size;
+    if (alignment_sectors <= 1) {
+        return lba; // Alignment is at most one sector, nothing to round.
+    }
+    // Round up to the next multiple of alignment_sectors. Use modulo rather than a
+    // power-of-two bitmask so non-power-of-two alignment/sector_size ratios work.
+    uint32_t remainder = lba % alignment_sectors;
+    if (remainder == 0) {
+        return lba; // Already aligned
+    }
+    return lba + (alignment_sectors - remainder);
 }
 
 static bool default_known_supported_partition_types(uint8_t type, esp_ext_part_type_known_t *out_type_parsed)
