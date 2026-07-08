@@ -138,8 +138,31 @@ char *parsed_type_to_str(uint8_t type)
         return "FAT32";
     case ESP_EXT_PART_TYPE_LITTLEFS:
         return "LittleFS";
+    case ESP_EXT_PART_TYPE_RAW_DATA:
+        return "raw data (0xDA)";
+    case ESP_EXT_PART_TYPE_EXFAT_OR_NTFS:
+        return "exFAT/NTFS";
+    case ESP_EXT_PART_TYPE_LINUX_ANY:
+        return "Linux";
+    case ESP_EXT_PART_TYPE_GPT_PROTECTIVE_MBR:
+        return "GPT protective MBR";
     default:
         break;
     }
     return "unknown";
+}
+
+const char *usage_to_str(esp_ext_part_usage_t usage)
+{
+    switch (usage) {
+    case ESP_EXT_PART_USAGE_MOUNTABLE:
+        return "mountable";
+    case ESP_EXT_PART_USAGE_RAW:
+        return "raw";
+    case ESP_EXT_PART_USAGE_UNSUPPORTED:
+        return "unsupported";
+    default:
+        break;
+    }
+    return "unclassified";
 }

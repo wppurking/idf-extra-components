@@ -7,6 +7,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include "esp_ext_part_tables.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,6 +15,7 @@ extern "C" {
 
 esp_err_t load_first_sector_from_sd_card(void *mbr_buffer);
 char *parsed_type_to_str(uint8_t type);
+const char *usage_to_str(esp_ext_part_usage_t usage);
 
 #ifdef __cplusplus
 }
