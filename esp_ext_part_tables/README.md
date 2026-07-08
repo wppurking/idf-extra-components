@@ -10,7 +10,49 @@ Currently only [MBR (Master boot record)](https://en.wikipedia.org/wiki/Master_b
 - Generate and manipulate partition lists in memory
 - Deep copy and de-initialize partition lists
 - Access partition information (address, size, type, label)
+- Classify and filter partitions by usage (mountable / raw / unsupported)
 - Example projects included
+
+## Partition usage classification and filtering (MBR parsing)
+
+`esp_mbr_parse` inserts **every recognized partition** into the list by default,
+regardless of whether ESP-IDF can mount it. Each partition can be classified by
+`esp_ext_part_type_usage(item->info.type)` into one of three usage classes
+(`esp_ext_part_usage_t`, usable as an OR'd mask):
+
+- `ESP_EXT_PART_USAGE_MOUNTABLE`: a known filesystem with an ESP-IDF driver
+  (FAT12/16/32, LittleFS).
+- `ESP_EXT_PART_USAGE_RAW`: recognized but has no filesystem to mount by design
+  (e.g. `0xDA` raw data); the application owns the raw bytes.
+- `ESP_EXT_PART_USAGE_UNSUPPORTED`: a recognized type with no ESP-IDF driver
+  (exFAT/NTFS, Linux, GPT-protective MBR).
+
+To iterate only certain classes, use `esp_ext_part_list_next_by_usage` (it mirrors
+`esp_ext_part_list_item_head`/`_next` but skips non-matching items):
+
+```c
+// Iterate only the mountable partitions.
+for (esp_ext_part_list_item_t *it = esp_ext_part_list_next_by_usage(NULL, &part_list, ESP_EXT_PART_USAGE_MOUNTABLE);
+     it != NULL;
+     it = esp_ext_part_list_next_by_usage(it, &part_list, ESP_EXT_PART_USAGE_MOUNTABLE)) {
+    // ...
+}
+```
+
+To restrict what gets inserted at parse time, set `usage_filter` on
+`esp_mbr_parse_extra_args_t` (OR the classes you want). Left `0`, all recognized
+partitions are inserted:
+
+```c
+esp_mbr_parse_extra_args_t args = { .usage_filter = ESP_EXT_PART_USAGE_MOUNTABLE };
+esp_mbr_parse((void*) loaded_mbr, &part_list, &args); // only mountable partitions
+```
+
+Whenever the parser skips a partition (an unknown/extended type, or one excluded by
+`usage_filter`), it sets `ESP_EXT_PART_LIST_FLAG_LOSSY` on the list. When that flag
+is **unset**, every partition on the source medium was captured, so regenerating an
+MBR from the list is functionally equivalent to the source (ignoring cosmetic
+differences such as CHS values or the disk signature).
 
 ## Alignment and layout validation (MBR generation)
 

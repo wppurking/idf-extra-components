@@ -976,6 +976,191 @@ TEST_CASE("Test empty partition in list is rejected", "[esp_ext_part_table]")
     TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
 }
 
+// ---------------------------------------------------------------------------
+// Partition usage classification, usage_filter and the LOSSY flag
+// ---------------------------------------------------------------------------
+
+// esp_ext_part_type_usage maps each known type to its usage class.
+TEST_CASE("Test esp_ext_part_type_usage classifies known types", "[esp_ext_part_table]")
+{
+    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_MOUNTABLE, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_FAT12));
+    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_MOUNTABLE, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_FAT16));
+    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_MOUNTABLE, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_FAT32));
+    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_MOUNTABLE, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_LITTLEFS));
+    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_RAW, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_RAW_DATA));
+    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_UNSUPPORTED, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_EXFAT_OR_NTFS));
+    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_UNSUPPORTED, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_LINUX_ANY));
+    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_UNSUPPORTED, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_GPT_PROTECTIVE_MBR));
+    TEST_ASSERT_EQUAL(0, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_NONE));
+}
+
+// Build an MBR with one MOUNTABLE (FAT32), one UNSUPPORTED (exFAT/NTFS) and one RAW
+// (0xDA) partition, so parse/classification behavior can be exercised.
+static void generate_mixed_usage_mbr(mbr_t *mbr)
+{
+    esp_mbr_generate_extra_args_t args = {
+        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
+        .alignment = ESP_EXT_PART_ALIGN_1MiB,
+    };
+    esp_ext_part_list_t part_list = {0};
+
+    esp_ext_part_list_item_t fat = {
+        .info = {
+            .address = esp_ext_part_sector_count_to_bytes(2048, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .size = esp_ext_part_sector_count_to_bytes(2048, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .type = ESP_EXT_PART_TYPE_FAT32,
+        }
+    };
+    esp_ext_part_list_item_t exfat = {
+        .info = {
+            .address = esp_ext_part_sector_count_to_bytes(6144, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .size = esp_ext_part_sector_count_to_bytes(2048, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .type = ESP_EXT_PART_TYPE_EXFAT_OR_NTFS,
+        }
+    };
+    esp_ext_part_list_item_t raw = {
+        .info = {
+            .address = esp_ext_part_sector_count_to_bytes(10240, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .size = esp_ext_part_sector_count_to_bytes(2048, ESP_EXT_PART_SECTOR_SIZE_512B),
+            .type = ESP_EXT_PART_TYPE_RAW_DATA,
+        }
+    };
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &fat));
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &exfat));
+    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &raw));
+    TEST_ESP_OK(esp_mbr_generate(mbr, &part_list, &args));
+    TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
+}
+
+static int count_list_items(esp_ext_part_list_t *list)
+{
+    int count = 0;
+    for (esp_ext_part_list_item_t *it = esp_ext_part_list_item_head(list); it != NULL; it = esp_ext_part_list_item_next(it)) {
+        count++;
+    }
+    return count;
+}
+
+// By default (usage_filter == 0) every recognized partition is inserted, including
+// the UNSUPPORTED one; nothing is dropped, so LOSSY must NOT be set.
+TEST_CASE("Test parse inserts all recognized types by default (not lossy)", "[esp_ext_part_table]")
+{
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    generate_mixed_usage_mbr(mbr);
+
+    esp_ext_part_list_t parsed = {0};
+    TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, NULL));
+
+    TEST_ASSERT_EQUAL(3, count_list_items(&parsed));
+    TEST_ASSERT_EQUAL(0, parsed.flags & ESP_EXT_PART_LIST_FLAG_LOSSY);
+
+    TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
+    free(mbr);
+}
+
+// With usage_filter = MOUNTABLE, only the FAT partition is inserted; the exFAT and
+// raw partitions are dropped, so LOSSY must be set.
+TEST_CASE("Test usage_filter inserts only matching classes and marks lossy", "[esp_ext_part_table]")
+{
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    generate_mixed_usage_mbr(mbr);
+
+    esp_mbr_parse_extra_args_t args = {
+        .usage_filter = ESP_EXT_PART_USAGE_MOUNTABLE,
+    };
+    esp_ext_part_list_t parsed = {0};
+    TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, &args));
+
+    TEST_ASSERT_EQUAL(1, count_list_items(&parsed));
+    esp_ext_part_list_item_t *it = esp_ext_part_list_item_head(&parsed);
+    TEST_ASSERT_NOT_NULL(it);
+    TEST_ASSERT_EQUAL(ESP_EXT_PART_TYPE_FAT32, it->info.type);
+    TEST_ASSERT_NOT_EQUAL(0, parsed.flags & ESP_EXT_PART_LIST_FLAG_LOSSY);
+
+    TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
+    free(mbr);
+}
+
+// An OR'd usage_filter keeps every matching class (MOUNTABLE + RAW = FAT + 0xDA),
+// dropping only the UNSUPPORTED exFAT partition (so still lossy).
+TEST_CASE("Test usage_filter accepts an OR'd mask", "[esp_ext_part_table]")
+{
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    generate_mixed_usage_mbr(mbr);
+
+    esp_mbr_parse_extra_args_t args = {
+        .usage_filter = ESP_EXT_PART_USAGE_MOUNTABLE | ESP_EXT_PART_USAGE_RAW,
+    };
+    esp_ext_part_list_t parsed = {0};
+    TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, &args));
+
+    TEST_ASSERT_EQUAL(2, count_list_items(&parsed));
+    TEST_ASSERT_NOT_EQUAL(0, parsed.flags & ESP_EXT_PART_LIST_FLAG_LOSSY);
+
+    TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
+    free(mbr);
+}
+
+// esp_ext_part_list_next_by_usage iterates only the items whose class matches the
+// mask, starting from the head when passed NULL.
+TEST_CASE("Test esp_ext_part_list_next_by_usage filters by class", "[esp_ext_part_table]")
+{
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    generate_mixed_usage_mbr(mbr);
+
+    esp_ext_part_list_t parsed = {0};
+    TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, NULL));
+
+    // MOUNTABLE only -> exactly the FAT32 partition, then NULL.
+    esp_ext_part_list_item_t *m = esp_ext_part_list_next_by_usage(NULL, &parsed, ESP_EXT_PART_USAGE_MOUNTABLE);
+    TEST_ASSERT_NOT_NULL(m);
+    TEST_ASSERT_EQUAL(ESP_EXT_PART_TYPE_FAT32, m->info.type);
+    TEST_ASSERT_NULL(esp_ext_part_list_next_by_usage(m, &parsed, ESP_EXT_PART_USAGE_MOUNTABLE));
+
+    // MOUNTABLE | RAW -> two items (FAT32 then 0xDA).
+    int matches = 0;
+    for (esp_ext_part_list_item_t *it = esp_ext_part_list_next_by_usage(NULL, &parsed, ESP_EXT_PART_USAGE_MOUNTABLE | ESP_EXT_PART_USAGE_RAW);
+            it != NULL;
+            it = esp_ext_part_list_next_by_usage(it, &parsed, ESP_EXT_PART_USAGE_MOUNTABLE | ESP_EXT_PART_USAGE_RAW)) {
+        matches++;
+    }
+    TEST_ASSERT_EQUAL(2, matches);
+
+    TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
+    free(mbr);
+}
+
+// A partition with an unknown/extended type (0x05) has no esp_ext_part_type_known_t
+// mapping; it is skipped during parse and the list is marked LOSSY.
+TEST_CASE("Test parse skips unknown type and marks lossy", "[esp_ext_part_table]")
+{
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    mbr->boot_signature = MBR_SIGNATURE;
+    // Slot 0: a valid FAT32 (0x0C) partition.
+    mbr->partition_table[0].type = 0x0C;
+    mbr->partition_table[0].lba_start = 2048;
+    mbr->partition_table[0].sector_count = 2048;
+    // Slot 1: extended partition (0x05) - unknown to this component.
+    mbr->partition_table[1].type = 0x05;
+    mbr->partition_table[1].lba_start = 4096;
+    mbr->partition_table[1].sector_count = 2048;
+
+    esp_ext_part_list_t parsed = {0};
+    TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, NULL));
+
+    // Only the FAT32 partition made it into the list.
+    TEST_ASSERT_EQUAL(1, count_list_items(&parsed));
+    TEST_ASSERT_NOT_EQUAL(0, parsed.flags & ESP_EXT_PART_LIST_FLAG_LOSSY);
+
+    TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
+    free(mbr);
+}
+
 #if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
 #include "esp_blockdev.h"
 

@@ -50,6 +50,7 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
     // Set defaults
     part_list->sector_size = ESP_EXT_PART_SECTOR_SIZE_512B; // Default sector size
     bool (*f_parse_supported_partition_types)(uint8_t, uint8_t *) = esp_mbr_parse_default_supported_partition_types;
+    esp_ext_part_usage_t usage_mask = ESP_EXT_PART_USAGE_ALL; // Default: insert all recognized partitions
 
     // Load extra arguments if provided
     if (extra_args) {
@@ -58,6 +59,9 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
         }
         if (extra_args->esp_mbr_parse_custom_supported_partition_types) {
             f_parse_supported_partition_types = extra_args->esp_mbr_parse_custom_supported_partition_types; // Use a custom function for supported partition types
+        }
+        if (extra_args->usage_filter != 0) {
+            usage_mask = extra_args->usage_filter; // Restrict to the requested usage classes
         }
     }
 
@@ -81,10 +85,20 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
             break; // No more partitions, exit the loop (MBR partition table cannot have holes in it)
         }
 
-        // If the partition entry is not supported, skip it as well
+        // Resolve the partition type. The bool return is not used to gate insertion
+        // anymore; classification is done via esp_ext_part_type_usage below.
         uint8_t parsed_type = ESP_EXT_PART_TYPE_NONE;
-        bool is_supported = f_parse_supported_partition_types(partition->type, &parsed_type);
-        if (!is_supported) {
+        (void) f_parse_supported_partition_types(partition->type, &parsed_type);
+        if (parsed_type == ESP_EXT_PART_TYPE_NONE) {
+            // Unknown/extended type: cannot be represented, so a regenerated table
+            // would differ from the source.
+            part_list->flags |= ESP_EXT_PART_LIST_FLAG_LOSSY;
+            continue;
+        }
+
+        // Skip partitions whose usage class is not requested by the caller.
+        if ((esp_ext_part_type_usage(parsed_type) & usage_mask) == 0) {
+            part_list->flags |= ESP_EXT_PART_LIST_FLAG_LOSSY;
             continue;
         }
 

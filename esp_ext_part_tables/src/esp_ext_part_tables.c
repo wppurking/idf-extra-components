@@ -125,6 +125,25 @@ esp_ext_part_list_item_t *esp_ext_part_list_item_next(esp_ext_part_list_item_t *
     return SLIST_NEXT(item, next);
 }
 
+esp_ext_part_list_item_t *esp_ext_part_list_next_by_usage(esp_ext_part_list_item_t *from, const esp_ext_part_list_t *list, esp_ext_part_usage_t usage)
+{
+    esp_ext_part_list_item_t *it;
+    if (from != NULL) {
+        it = SLIST_NEXT(from, next);
+    } else if (list != NULL) {
+        it = SLIST_FIRST(&list->head);
+    } else {
+        return NULL;
+    }
+
+    for (; it != NULL; it = SLIST_NEXT(it, next)) {
+        if (esp_ext_part_type_usage(it->info.type) & usage) {
+            return it;
+        }
+    }
+    return NULL;
+}
+
 esp_err_t esp_ext_part_list_signature_get(esp_ext_part_list_t *part_list, void *signature)
 {
     if (part_list == NULL || signature == NULL) {

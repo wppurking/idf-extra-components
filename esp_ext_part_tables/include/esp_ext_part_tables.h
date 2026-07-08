@@ -74,7 +74,23 @@ typedef enum {
 typedef enum {
     ESP_EXT_PART_LIST_FLAG_NONE = 0,
     ESP_EXT_PART_LIST_FLAG_READ_ONLY = 1 << 0, /*!< Read-only partition list */
+    ESP_EXT_PART_LIST_FLAG_LOSSY = 1 << 1, /*!< Set by the parser when one or more source partitions were skipped (unknown/extended type, or excluded by `usage_filter`), so a regenerated table would NOT be functionally equivalent to the source. Unset = every recognized partition was captured. */
 } esp_ext_part_list_flags_t;
+
+/**
+ * @brief Usage classification of a partition, based on its type.
+ *
+ * Bit-flags so classes can be OR'd together (e.g. for `usage_filter` or
+ * `esp_ext_part_list_next_by_usage`).
+ */
+typedef enum {
+    ESP_EXT_PART_USAGE_NONE        = 0,      /*!< No usage class (empty or unknown partition type). */
+    ESP_EXT_PART_USAGE_MOUNTABLE   = 1 << 0, /*!< Known filesystem with an ESP-IDF driver (FAT12/16/32, LittleFS). */
+    ESP_EXT_PART_USAGE_RAW         = 1 << 1, /*!< Recognized but has no filesystem to mount by design (e.g. 0xDA raw data); the application owns the raw bytes. */
+    ESP_EXT_PART_USAGE_UNSUPPORTED = 1 << 2, /*!< Recognized type but ESP-IDF has no driver for it (exFAT/NTFS, Linux, GPT-protective MBR). */
+    /*!< Convenience mask matching every usage class. */
+    ESP_EXT_PART_USAGE_ALL         = (ESP_EXT_PART_USAGE_MOUNTABLE | ESP_EXT_PART_USAGE_RAW | ESP_EXT_PART_USAGE_UNSUPPORTED),
+} esp_ext_part_usage_t;
 
 typedef enum {
     ESP_EXT_PART_LIST_SIGNATURE_MBR, /*!< MBR signature type */
@@ -196,6 +212,35 @@ esp_ext_part_list_item_t *esp_ext_part_list_item_head(esp_ext_part_list_t *part_
  * @return Pointer to the next partition list item, or NULL if there are no more items.
  */
 esp_ext_part_list_item_t *esp_ext_part_list_item_next(esp_ext_part_list_item_t *item);
+
+/**
+ * @brief Get the usage classification of a partition type.
+ *
+ * The classification is derived purely from the type; nothing is stored on the
+ * partition item.
+ *
+ * @param[in] type Partition type (a value of `esp_ext_part_type_known_t`, stored in `esp_ext_part_t::type`).
+ *
+ * @return The usage class (`ESP_EXT_PART_USAGE_MOUNTABLE`, `ESP_EXT_PART_USAGE_RAW`,
+ *         or `ESP_EXT_PART_USAGE_UNSUPPORTED`), or 0 if the type has no class
+ *         (e.g. `ESP_EXT_PART_TYPE_NONE` or an unknown type).
+ */
+esp_ext_part_usage_t esp_ext_part_type_usage(uint8_t type);
+
+/**
+ * @brief Iterate over partition list items matching a usage class mask.
+ *
+ * Returns the next item whose usage class (see `esp_ext_part_type_usage`)
+ * intersects the given `usage` mask. Mirrors `esp_ext_part_list_item_head` /
+ * `esp_ext_part_list_item_next`, but skips items that do not match.
+ *
+ * @param[in] from  Current item; pass NULL to start from the head of `list`.
+ * @param[in] list  Partition list to iterate (used only when `from` is NULL).
+ * @param[in] usage OR'd mask of `esp_ext_part_usage_t` classes to match.
+ *
+ * @return Pointer to the next matching item, or NULL if there are no more.
+ */
+esp_ext_part_list_item_t *esp_ext_part_list_next_by_usage(esp_ext_part_list_item_t *from, const esp_ext_part_list_t *list, esp_ext_part_usage_t usage);
 
 /**
  * @brief Get the signature of an external partition list.
