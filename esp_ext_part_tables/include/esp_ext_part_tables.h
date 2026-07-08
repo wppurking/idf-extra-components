@@ -56,6 +56,7 @@ typedef enum __attribute__((packed))
     ESP_EXT_PART_TYPE_FAT16, /*!< FAT16 with LBA addressing */
     ESP_EXT_PART_TYPE_FAT32, /*!< FAT32 with LBA addressing */
     ESP_EXT_PART_TYPE_LITTLEFS, /*!< Possibly LittleFS (MBR CHS field => LittleFS block size hack) */
+    ESP_EXT_PART_TYPE_RAW_DATA, /*!< Non-filesystem/custom data partition (e.g. raw data, custom format, etc.) */
 // Note: The following types are not supported, but we can return a type for them
     ESP_EXT_PART_TYPE_LINUX_ANY, /*!< Linux partition (any type) */
     ESP_EXT_PART_TYPE_EXFAT_OR_NTFS, /*!< Not supported, but we can return a type for it */

@@ -253,8 +253,6 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
         .alignment = ESP_EXT_PART_ALIGN_AUTO, // Resolved to the default (1 MiB) below unless overridden
         .align_policy = ESP_EXT_PART_ALIGN_POLICY_KEEP_SIZE, // Default: keep the requested size (current behavior)
         .keep_signature = false, // Default is to generate a new disk signature
-        .disable_overlap_check = false, // Default: reject overlapping partitions
-        .allow_empty_partitions = false, // Default: reject ESP_EXT_PART_TYPE_NONE items (they would create a gap)
     };
 
     // Load extra arguments if provided
@@ -271,9 +269,7 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
             args.esp_mbr_generate_custom_supported_partition_types = extra_args->esp_mbr_generate_custom_supported_partition_types;
         }
         args.align_policy = extra_args->align_policy;
-        args.disable_overlap_check = extra_args->disable_overlap_check;
         args.total_size = extra_args->total_size;
-        args.allow_empty_partitions = extra_args->allow_empty_partitions;
     }
 
     // Resolve ESP_EXT_PART_ALIGN_AUTO to the library default alignment (1 MiB)
@@ -319,19 +315,12 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
             break; // MBR can only hold 4 partitions
         }
 
-        // An empty (ESP_EXT_PART_TYPE_NONE) item cannot be written as a partition
-        // entry: doing so would leave a zeroed slot in the middle of the table,
-        // which esp_mbr_parse stops at (silently dropping later partitions) and
-        // which resets the auto-placement cursor. Reject it by default; only skip
-        // it (without consuming a slot or advancing the cursor) if explicitly allowed.
+        // An empty (ESP_EXT_PART_TYPE_NONE) item cannot be written as a partition entry:
+        // it would leave a zeroed slot in the middle of the table, which esp_mbr_parse
+        // stops at (silently dropping later partitions). Reject it.
         if (it->info.type == ESP_EXT_PART_TYPE_NONE) {
-            if (!args.allow_empty_partitions) {
-                ESP_LOGE(TAG, "Empty partition (ESP_EXT_PART_TYPE_NONE) in list would create a gap; set allow_empty_partitions to skip it");
-                return ESP_ERR_INVALID_ARG;
-            } else {
-                ESP_LOGW(TAG, "Empty partition (ESP_EXT_PART_TYPE_NONE) in list at index %d will be skipped (no MBR entry written)", i);
-            }
-            continue; // Skip: do not write a slot, do not advance i / next_free_lba
+            ESP_LOGE(TAG, "Empty partition (ESP_EXT_PART_TYPE_NONE) in list would create a gap in the MBR partition table");
+            return ESP_ERR_INVALID_ARG;
         }
 
         // FILL without AUTO_ADDRESS has no effect (FILL is only resolved inside the
@@ -390,7 +379,7 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
     for (int a = 0; a < partition_count; a++) {
         mbr_partition_t *pa = &mbr->partition_table[a];
         if (pa->type == 0x00) {
-            continue; // Empty entry (e.g. a ESP_EXT_PART_TYPE_NONE item), nothing to validate
+            continue; // Empty entry, nothing to validate
         }
         uint64_t a_start = pa->lba_start;
         uint64_t a_end = a_start + pa->sector_count; // exclusive
@@ -403,19 +392,17 @@ esp_err_t esp_mbr_generate(mbr_t *mbr,
         }
 
         // Overlap check against previously placed partitions.
-        if (!args.disable_overlap_check) {
-            for (int b = 0; b < a; b++) {
-                mbr_partition_t *pb = &mbr->partition_table[b];
-                if (pb->type == 0x00) {
-                    continue;
-                }
-                uint64_t b_start = pb->lba_start;
-                uint64_t b_end = b_start + pb->sector_count; // exclusive
-                if (a_start < b_end && b_start < a_end) {
-                    ESP_LOGE(TAG, "Partition %d (sectors %" PRIu64 "..%" PRIu64 ") overlaps partition %d (sectors %" PRIu64 "..%" PRIu64 ")",
-                             a, a_start, a_end, b, b_start, b_end);
-                    return ESP_ERR_INVALID_STATE;
-                }
+        for (int b = 0; b < a; b++) {
+            mbr_partition_t *pb = &mbr->partition_table[b];
+            if (pb->type == 0x00) {
+                continue;
+            }
+            uint64_t b_start = pb->lba_start;
+            uint64_t b_end = b_start + pb->sector_count; // exclusive
+            if (a_start < b_end && b_start < a_end) {
+                ESP_LOGE(TAG, "Partition %d (sectors %" PRIu64 "..%" PRIu64 ") overlaps partition %d (sectors %" PRIu64 "..%" PRIu64 ")",
+                         a, a_start, a_end, b, b_start, b_end);
+                return ESP_ERR_INVALID_STATE;
             }
         }
     }

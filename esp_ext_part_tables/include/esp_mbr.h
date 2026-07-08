@@ -80,11 +80,9 @@ typedef struct {
     uint64_t total_size; // Total device size in bytes for the "fits within disk" check; 0 disables the check. The BDL write helper auto-fills this from the device geometry when left 0.
     uint8_t (*esp_mbr_generate_custom_supported_partition_types)(uint8_t); // Custom function for generating supported MBR partition types, optional
     esp_ext_part_sector_size_t sector_size; // Sector size for correct LBA alignment. Overrides the list's `sector_size` for this call; 0 (UNKNOWN) falls back to the list's value, then to 512 B.
-    esp_ext_part_align_t alignment; // Alignment hint for correct LBA alignment
+    esp_ext_part_align_t alignment; // Partition start alignment. 0 (ESP_EXT_PART_ALIGN_AUTO, the default) resolves to 1 MiB; ESP_EXT_PART_ALIGN_NONE leaves LBAs untouched; ESP_EXT_PART_ALIGN_4KiB / ESP_EXT_PART_ALIGN_1MiB request a specific alignment.
     esp_ext_part_align_policy_t align_policy; // Policy applied when alignment moves a partition start (default 0 = KEEP_SIZE)
     bool keep_signature; // If true, the disk signature will be preserved in the generated MBR and not overwritten with a random value
-    bool disable_overlap_check; // If false (default), generation fails when two partitions overlap
-    bool allow_empty_partitions; // If false (default), a list item with type ESP_EXT_PART_TYPE_NONE is rejected (it would create a gap that truncates the parsed table). If true, such items are silently skipped instead.
 } esp_mbr_generate_extra_args_t;
 
 /**
@@ -120,9 +118,8 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
  * via the extra_args parameter.
  *
  * After all partition entries are written, the generated layout is validated:
- * overlapping partitions are rejected (unless `extra_args->disable_overlap_check`
- * is set), and if `extra_args->total_size` is non-zero, partitions that run past
- * the end of the disk are rejected.
+ * overlapping partitions are rejected, and if `extra_args->total_size` is
+ * non-zero, partitions that run past the end of the disk are rejected.
  *
  * Alignment behavior:
  *   - `extra_args->alignment == ESP_EXT_PART_ALIGN_AUTO` (the default when a
@@ -147,19 +144,18 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
  * Empty list items:
  *   - A list item with `type == ESP_EXT_PART_TYPE_NONE` cannot be encoded as a
  *     partition entry without leaving a gap in the table (which truncates the parsed
- *     result and disturbs auto-placement). By default such an item is rejected with
- *     `ESP_ERR_INVALID_ARG`; set `extra_args->allow_empty_partitions` to skip it
- *     instead (it then consumes no partition slot).
+ *     result and disturbs auto-placement). Such an item is rejected with
+ *     `ESP_ERR_INVALID_ARG`.
  *
  * @note This function is not thread-safe.
  *
  * @param[out] mbr         Pointer to the blank MBR structure to be filled (must already be allocated and be at least `MBR_SIZE` bytes).
  * @param[in]  part_list   Pointer to the partition list structure containing partition entries to encode.
- * @param[in]  extra_args  Optional extra arguments for generation (can be NULL for defaults: 1 MiB alignment, KEEP_SIZE policy, overlap checking enabled, no disk-bounds check).
+ * @param[in]  extra_args  Optional extra arguments for generation (can be NULL for defaults: 1 MiB alignment, KEEP_SIZE policy, no disk-bounds check).
  *
  * @return
  *     - ESP_OK:                Generation was successful.
- *     - ESP_ERR_INVALID_ARG:   Invalid arguments were provided, a partition start was not aligned while `align_policy` is `ESP_EXT_PART_ALIGN_POLICY_REJECT`, an AUTO_ADDRESS partition has size 0 without the FILL flag, or a list item has type `ESP_EXT_PART_TYPE_NONE` while `allow_empty_partitions` is false.
+ *     - ESP_ERR_INVALID_ARG:   Invalid arguments were provided, a partition start was not aligned while `align_policy` is `ESP_EXT_PART_ALIGN_POLICY_REJECT`, an AUTO_ADDRESS partition has size 0 without the FILL flag, or a list item has type `ESP_EXT_PART_TYPE_NONE`.
  *     - ESP_ERR_INVALID_STATE: Error filling a partition entry, or two partitions overlap.
  *     - ESP_ERR_INVALID_SIZE:  Alignment consumed a whole partition (PRESERVE_END policy), a partition runs past `total_size`, or a FILL partition cannot be sized (no/insufficient total size).
  *     - ESP_ERR_NOT_SUPPORTED: Partition address or size (sector count) exceeds 32-bit limit of MBR.

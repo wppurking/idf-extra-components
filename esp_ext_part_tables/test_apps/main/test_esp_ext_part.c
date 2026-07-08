@@ -546,8 +546,8 @@ TEST_CASE("Test ALIGN_AUTO applies the 1MiB default alignment", "[esp_ext_part_t
     free(mbr2);
 }
 
-// Test 8 & 9: overlap detection and disabling it.
-TEST_CASE("Test overlapping partitions are rejected unless the check is disabled", "[esp_ext_part_table]")
+// Test 8: overlap detection (always on).
+TEST_CASE("Test overlapping partitions are rejected", "[esp_ext_part_table]")
 {
     esp_ext_part_list_t part_list = {0};
     // Two partitions that overlap: p0 = [2048, 2048+4096), p1 starts at 4096 (< 6144) with NONE alignment.
@@ -571,17 +571,12 @@ TEST_CASE("Test overlapping partitions are rejected unless the check is disabled
     mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
     TEST_ASSERT_NOT_NULL(mbr);
 
-    // With overlap check on (default) and NONE alignment -> overlap error.
+    // With NONE alignment the two partitions overlap -> overlap error.
     esp_mbr_generate_extra_args_t args = {
         .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
         .alignment = ESP_EXT_PART_ALIGN_NONE,
     };
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, esp_mbr_generate(mbr, &part_list, &args));
-
-    // With overlap check disabled -> ok.
-    memset(mbr, 0, sizeof(mbr_t));
-    args.disable_overlap_check = true;
-    TEST_ESP_OK(esp_mbr_generate(mbr, &part_list, &args));
 
     free(mbr);
     TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
@@ -941,9 +936,9 @@ TEST_CASE("Test FILL without AUTO_ADDRESS: size 0 is rejected", "[esp_ext_part_t
 
 // A ESP_EXT_PART_TYPE_NONE item in the middle of the list would, if written as a
 // zeroed slot, create a gap that esp_mbr_parse silently truncates at (data loss)
-// and that misplaces auto-placed partitions. By default esp_mbr_generate must
-// reject such an item instead of producing a bad MBR.
-TEST_CASE("Test empty partition in list is rejected by default", "[esp_ext_part_table]")
+// and that misplaces auto-placed partitions. esp_mbr_generate must reject such an
+// item instead of producing a bad MBR.
+TEST_CASE("Test empty partition in list is rejected", "[esp_ext_part_table]")
 {
     esp_mbr_generate_extra_args_t args = {
         .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
@@ -977,116 +972,6 @@ TEST_CASE("Test empty partition in list is rejected by default", "[esp_ext_part_
     mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
     TEST_ASSERT_NOT_NULL(mbr);
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, esp_mbr_generate(mbr, &part_list, &args));
-    free(mbr);
-    TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
-}
-
-// With allow_empty_partitions set, a NONE item is skipped (not written to a slot),
-// so no gap is produced: the following partition still lands in a contiguous slot
-// and survives a generate -> parse round-trip (no silent truncation).
-TEST_CASE("Test empty partition in list is skipped when allowed", "[esp_ext_part_table]")
-{
-    esp_mbr_generate_extra_args_t args = {
-        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
-        .alignment = ESP_EXT_PART_ALIGN_1MiB,
-        .allow_empty_partitions = true,
-    };
-    esp_ext_part_list_t part_list = {0};
-
-    esp_ext_part_list_item_t p0 = {
-        .info = {
-            .address = esp_ext_part_sector_count_to_bytes(2048, ESP_EXT_PART_SECTOR_SIZE_512B),
-            .size = esp_ext_part_sector_count_to_bytes(1000, ESP_EXT_PART_SECTOR_SIZE_512B),
-            .type = ESP_EXT_PART_TYPE_FAT12,
-        }
-    };
-    esp_ext_part_list_item_t empty = {
-        .info = {
-            .type = ESP_EXT_PART_TYPE_NONE, // gap, to be skipped
-        }
-    };
-    esp_ext_part_list_item_t p2 = {
-        .info = {
-            .address = esp_ext_part_sector_count_to_bytes(6144, ESP_EXT_PART_SECTOR_SIZE_512B),
-            .size = esp_ext_part_sector_count_to_bytes(1000, ESP_EXT_PART_SECTOR_SIZE_512B),
-            .type = ESP_EXT_PART_TYPE_FAT12,
-        }
-    };
-    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &p0));
-    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &empty));
-    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &p2));
-
-    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
-    TEST_ASSERT_NOT_NULL(mbr);
-    TEST_ESP_OK(esp_mbr_generate(mbr, &part_list, &args));
-    TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
-
-    // The two real partitions occupy contiguous slots 0 and 1 (no gap at slot 1).
-    TEST_ASSERT_EQUAL_UINT32(2048, mbr->partition_table[0].lba_start);
-    TEST_ASSERT_NOT_EQUAL(0, mbr->partition_table[1].type);
-    TEST_ASSERT_EQUAL_UINT32(6144, mbr->partition_table[1].lba_start);
-    TEST_ASSERT_EQUAL_UINT32(0, mbr->partition_table[2].type); // nothing shifted past
-
-    // Round-trip: both partitions must survive parsing (no silent truncation).
-    esp_ext_part_list_t parsed = {0};
-    TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, NULL));
-    esp_ext_part_list_item_t *it = esp_ext_part_list_item_head(&parsed);
-    TEST_ASSERT_NOT_NULL(it);
-    int count = 1;
-    while ((it = esp_ext_part_list_item_next(it)) != NULL) {
-        count++;
-    }
-    TEST_ASSERT_EQUAL(2, count);
-    TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
-    free(mbr);
-}
-
-// A skipped empty item must NOT advance the auto-placement cursor. Two AUTO_ADDRESS
-// partitions separated by a NONE item must chain as if the empty item was absent,
-// i.e. the second must be placed after the first (not back at the first aligned LBA,
-// which would overlap).
-TEST_CASE("Test empty partition does not disturb auto-placement cursor", "[esp_ext_part_table]")
-{
-    esp_mbr_generate_extra_args_t args = {
-        .sector_size = ESP_EXT_PART_SECTOR_SIZE_512B,
-        .alignment = ESP_EXT_PART_ALIGN_1MiB,
-        .allow_empty_partitions = true,
-    };
-    esp_ext_part_list_t part_list = {0};
-
-    // p0 AUTO, size 1000 -> [2048, 3048).
-    esp_ext_part_list_item_t p0 = {
-        .info = {
-            .size = esp_ext_part_sector_count_to_bytes(1000, ESP_EXT_PART_SECTOR_SIZE_512B),
-            .type = ESP_EXT_PART_TYPE_FAT12,
-            .flags = ESP_EXT_PART_FLAG_AUTO_ADDRESS,
-        }
-    };
-    esp_ext_part_list_item_t empty = {
-        .info = {
-            .type = ESP_EXT_PART_TYPE_NONE, // skipped; must not reset the cursor
-        }
-    };
-    // p2 AUTO, size 500 -> must be align_up(3048) = 4096, NOT 2048.
-    esp_ext_part_list_item_t p2 = {
-        .info = {
-            .size = esp_ext_part_sector_count_to_bytes(500, ESP_EXT_PART_SECTOR_SIZE_512B),
-            .type = ESP_EXT_PART_TYPE_FAT12,
-            .flags = ESP_EXT_PART_FLAG_AUTO_ADDRESS,
-        }
-    };
-    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &p0));
-    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &empty));
-    TEST_ESP_OK(esp_ext_part_list_insert(&part_list, &p2));
-
-    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
-    TEST_ASSERT_NOT_NULL(mbr);
-    // If the cursor were reset by the empty item, p2 would land at 2048 and overlap
-    // p0 -> ESP_ERR_INVALID_STATE. Correct behavior places it at 4096 -> ESP_OK.
-    TEST_ESP_OK(esp_mbr_generate(mbr, &part_list, &args));
-    TEST_ASSERT_EQUAL_UINT32(2048, mbr->partition_table[0].lba_start);
-    TEST_ASSERT_EQUAL_UINT32(4096, mbr->partition_table[1].lba_start);
-    TEST_ASSERT_EQUAL_UINT32(500, mbr->partition_table[1].sector_count);
     free(mbr);
     TEST_ESP_OK(esp_ext_part_list_deinit(&part_list));
 }

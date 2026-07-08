@@ -105,6 +105,9 @@ static bool default_known_supported_partition_types(uint8_t type, esp_ext_part_t
     case 0xC3: // Possibly LittleFS (MBR CHS field => LittleFS block size hack)
         parsed_type = ESP_EXT_PART_TYPE_LITTLEFS;
         break;
+    case 0xDA: // Non-filesystem/custom data partition (e.g. raw data, custom format, etc.)
+        parsed_type = ESP_EXT_PART_TYPE_RAW_DATA;
+        break;
 
     // Unsupported types:
     case 0x07: // exFAT or NTFS
@@ -169,6 +172,8 @@ uint8_t esp_mbr_generate_default_supported_partition_types(uint8_t type)
     */
     case ESP_EXT_PART_TYPE_LITTLEFS:
         return 0xC3; // Possibly LittleFS (MBR CHS field => LittleFS block size hack)
+    case ESP_EXT_PART_TYPE_RAW_DATA:
+        return 0xDA; // Non-filesystem/custom data partition (e.g. raw data, custom format, etc.)
     case ESP_EXT_PART_TYPE_EXFAT_OR_NTFS: // Not supported, but we can return a type for it
         return 0x07; // exFAT or NTFS
     case ESP_EXT_PART_TYPE_LINUX_ANY: // Not supported, but we can return a type for it

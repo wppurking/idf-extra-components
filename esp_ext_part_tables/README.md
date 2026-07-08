@@ -37,11 +37,10 @@ to 512 B.
   `ESP_EXT_PART_ALIGN_POLICY_REJECT` returns an error if a start was not already
   aligned; `ESP_EXT_PART_ALIGN_POLICY_PRESERVE_END` shrinks the size so the end
   stays at the originally requested `address + size`.
-- `disable_overlap_check`: overlapping partitions are rejected by default; set
-  this to skip the check.
-- `allow_empty_partitions`: a list item with type `ESP_EXT_PART_TYPE_NONE` would
-  create a gap in the partition table (which truncates the parsed result). By
-  default such an item is rejected; set this to skip it instead.
+
+Overlapping partitions are always rejected, and a list item with type
+`ESP_EXT_PART_TYPE_NONE` (which would create a gap that truncates the parsed
+table) is rejected with `ESP_ERR_INVALID_ARG`.
 
 ## Automatic partition placement (MBR generation)
 
