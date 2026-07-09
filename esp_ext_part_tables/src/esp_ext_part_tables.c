@@ -125,8 +125,11 @@ esp_ext_part_list_item_t *esp_ext_part_list_item_next(esp_ext_part_list_item_t *
     return SLIST_NEXT(item, next);
 }
 
-esp_ext_part_list_item_t *esp_ext_part_list_next_by_usage(esp_ext_part_list_item_t *from, const esp_ext_part_list_t *list, esp_ext_part_usage_t usage)
+esp_ext_part_list_item_t *esp_ext_part_list_next_matching(esp_ext_part_list_item_t *from, const esp_ext_part_list_t *list, const esp_ext_part_match_t *matcher)
 {
+    if (matcher == NULL || matcher->fn == NULL) {
+        return NULL;
+    }
     esp_ext_part_list_item_t *it;
     if (from != NULL) {
         it = SLIST_NEXT(from, next);
@@ -137,7 +140,7 @@ esp_ext_part_list_item_t *esp_ext_part_list_next_by_usage(esp_ext_part_list_item
     }
 
     for (; it != NULL; it = SLIST_NEXT(it, next)) {
-        if (esp_ext_part_type_usage(it->info.type) & usage) {
+        if (matcher->fn(&it->info, matcher->ctx)) {
             return it;
         }
     }

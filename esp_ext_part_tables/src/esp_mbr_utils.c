@@ -88,8 +88,8 @@ static bool default_known_supported_partition_types(uint8_t type, esp_ext_part_t
 {
     // `supported` reports whether ESP-IDF has a driver for the type (i.e. it is
     // mountable). It no longer gates whether the parser inserts the partition;
-    // insertion and usage filtering are driven by esp_ext_part_type_usage(). The
-    // return value is kept for the public callback contract.
+    // insertion is driven by the type mapping and the optional parse `match`
+    // predicate. The return value is kept for the public callback contract.
     bool supported = true;
     esp_ext_part_type_known_t parsed_type = ESP_EXT_PART_TYPE_NONE;
     switch (type) {
@@ -189,22 +189,33 @@ uint8_t esp_mbr_generate_default_supported_partition_types(uint8_t type)
     }
 }
 
-esp_ext_part_usage_t esp_ext_part_type_usage(uint8_t type)
+static bool match_mountable_fn(const esp_ext_part_t *info, void *ctx)
 {
-    switch ((esp_ext_part_type_known_t) type) {
+    (void) ctx;
+    if (info == NULL) {
+        return false;
+    }
+    switch ((esp_ext_part_type_known_t) info->type) {
     case ESP_EXT_PART_TYPE_FAT12:
     case ESP_EXT_PART_TYPE_FAT16:
     case ESP_EXT_PART_TYPE_FAT32:
+        return true; // FatFs is part of ESP-IDF
     case ESP_EXT_PART_TYPE_LITTLEFS:
-        return ESP_EXT_PART_USAGE_MOUNTABLE;
-    case ESP_EXT_PART_TYPE_RAW_DATA:
-        return ESP_EXT_PART_USAGE_RAW;
-    case ESP_EXT_PART_TYPE_EXFAT_OR_NTFS:
-    case ESP_EXT_PART_TYPE_LINUX_ANY:
-    case ESP_EXT_PART_TYPE_GPT_PROTECTIVE_MBR:
-        return ESP_EXT_PART_USAGE_UNSUPPORTED;
-    case ESP_EXT_PART_TYPE_NONE:
+        // Mountable only if the LittleFS component is available to this library at
+        // compile time (its header is visible), or explicitly forced by the consumer.
+#if defined(ESP_EXT_PART_HAS_LITTLEFS) || (defined(__has_include) && __has_include("esp_littlefs.h"))
+        return true;
+#else
+        return false;
+#endif
     default:
-        return ESP_EXT_PART_USAGE_NONE; // No class (empty or unknown type)
+        return false;
     }
+}
+
+esp_ext_part_match_t esp_ext_part_match_mountable(void)
+{
+    return (esp_ext_part_match_t) {
+        .fn = match_mountable_fn, .ctx = NULL
+    };
 }

@@ -977,25 +977,11 @@ TEST_CASE("Test empty partition in list is rejected", "[esp_ext_part_table]")
 }
 
 // ---------------------------------------------------------------------------
-// Partition usage classification, usage_filter and the LOSSY flag
+// Parse-time filtering (esp_mbr_parse_extra_args_t.match) and the LOSSY flag
 // ---------------------------------------------------------------------------
 
-// esp_ext_part_type_usage maps each known type to its usage class.
-TEST_CASE("Test esp_ext_part_type_usage classifies known types", "[esp_ext_part_table]")
-{
-    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_MOUNTABLE, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_FAT12));
-    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_MOUNTABLE, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_FAT16));
-    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_MOUNTABLE, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_FAT32));
-    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_MOUNTABLE, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_LITTLEFS));
-    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_RAW, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_RAW_DATA));
-    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_UNSUPPORTED, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_EXFAT_OR_NTFS));
-    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_UNSUPPORTED, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_LINUX_ANY));
-    TEST_ASSERT_EQUAL(ESP_EXT_PART_USAGE_UNSUPPORTED, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_GPT_PROTECTIVE_MBR));
-    TEST_ASSERT_EQUAL(0, esp_ext_part_type_usage(ESP_EXT_PART_TYPE_NONE));
-}
-
-// Build an MBR with one MOUNTABLE (FAT32), one UNSUPPORTED (exFAT/NTFS) and one RAW
-// (0xDA) partition, so parse/classification behavior can be exercised.
+// Build an MBR with one FAT32, one exFAT/NTFS and one raw-data (0xDA) partition, so
+// parse-time filtering behavior can be exercised.
 static void generate_mixed_usage_mbr(mbr_t *mbr)
 {
     esp_mbr_generate_extra_args_t args = {
@@ -1041,8 +1027,21 @@ static int count_list_items(esp_ext_part_list_t *list)
     return count;
 }
 
-// By default (usage_filter == 0) every recognized partition is inserted, including
-// the UNSUPPORTED one; nothing is dropped, so LOSSY must NOT be set.
+// Parse-filter predicates.
+static bool keep_only_fat32(const esp_ext_part_t *info, void *ctx)
+{
+    (void) ctx;
+    return info->type == ESP_EXT_PART_TYPE_FAT32;
+}
+
+static bool keep_fat32_or_raw(const esp_ext_part_t *info, void *ctx)
+{
+    (void) ctx;
+    return info->type == ESP_EXT_PART_TYPE_FAT32 || info->type == ESP_EXT_PART_TYPE_RAW_DATA;
+}
+
+// By default (match == NULL) every recognized partition is inserted, including the
+// exFAT one; nothing is dropped, so LOSSY must NOT be set.
 TEST_CASE("Test parse inserts all recognized types by default (not lossy)", "[esp_ext_part_table]")
 {
     mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
@@ -1059,16 +1058,16 @@ TEST_CASE("Test parse inserts all recognized types by default (not lossy)", "[es
     free(mbr);
 }
 
-// With usage_filter = MOUNTABLE, only the FAT partition is inserted; the exFAT and
-// raw partitions are dropped, so LOSSY must be set.
-TEST_CASE("Test usage_filter inserts only matching classes and marks lossy", "[esp_ext_part_table]")
+// With a match predicate that keeps only FAT32, the exFAT and raw partitions are
+// dropped at parse time, so LOSSY must be set.
+TEST_CASE("Test parse match predicate inserts only matching partitions and marks lossy", "[esp_ext_part_table]")
 {
     mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
     TEST_ASSERT_NOT_NULL(mbr);
     generate_mixed_usage_mbr(mbr);
 
     esp_mbr_parse_extra_args_t args = {
-        .usage_filter = ESP_EXT_PART_USAGE_MOUNTABLE,
+        .match = { .fn = keep_only_fat32 },
     };
     esp_ext_part_list_t parsed = {0};
     TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, &args));
@@ -1083,52 +1082,21 @@ TEST_CASE("Test usage_filter inserts only matching classes and marks lossy", "[e
     free(mbr);
 }
 
-// An OR'd usage_filter keeps every matching class (MOUNTABLE + RAW = FAT + 0xDA),
-// dropping only the UNSUPPORTED exFAT partition (so still lossy).
-TEST_CASE("Test usage_filter accepts an OR'd mask", "[esp_ext_part_table]")
+// A match predicate keeping FAT32 + raw drops only the exFAT partition (still lossy).
+TEST_CASE("Test parse match predicate keeps multiple types", "[esp_ext_part_table]")
 {
     mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
     TEST_ASSERT_NOT_NULL(mbr);
     generate_mixed_usage_mbr(mbr);
 
     esp_mbr_parse_extra_args_t args = {
-        .usage_filter = ESP_EXT_PART_USAGE_MOUNTABLE | ESP_EXT_PART_USAGE_RAW,
+        .match = { .fn = keep_fat32_or_raw },
     };
     esp_ext_part_list_t parsed = {0};
     TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, &args));
 
     TEST_ASSERT_EQUAL(2, count_list_items(&parsed));
     TEST_ASSERT_NOT_EQUAL(0, parsed.flags & ESP_EXT_PART_LIST_FLAG_LOSSY);
-
-    TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
-    free(mbr);
-}
-
-// esp_ext_part_list_next_by_usage iterates only the items whose class matches the
-// mask, starting from the head when passed NULL.
-TEST_CASE("Test esp_ext_part_list_next_by_usage filters by class", "[esp_ext_part_table]")
-{
-    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
-    TEST_ASSERT_NOT_NULL(mbr);
-    generate_mixed_usage_mbr(mbr);
-
-    esp_ext_part_list_t parsed = {0};
-    TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, NULL));
-
-    // MOUNTABLE only -> exactly the FAT32 partition, then NULL.
-    esp_ext_part_list_item_t *m = esp_ext_part_list_next_by_usage(NULL, &parsed, ESP_EXT_PART_USAGE_MOUNTABLE);
-    TEST_ASSERT_NOT_NULL(m);
-    TEST_ASSERT_EQUAL(ESP_EXT_PART_TYPE_FAT32, m->info.type);
-    TEST_ASSERT_NULL(esp_ext_part_list_next_by_usage(m, &parsed, ESP_EXT_PART_USAGE_MOUNTABLE));
-
-    // MOUNTABLE | RAW -> two items (FAT32 then 0xDA).
-    int matches = 0;
-    for (esp_ext_part_list_item_t *it = esp_ext_part_list_next_by_usage(NULL, &parsed, ESP_EXT_PART_USAGE_MOUNTABLE | ESP_EXT_PART_USAGE_RAW);
-            it != NULL;
-            it = esp_ext_part_list_next_by_usage(it, &parsed, ESP_EXT_PART_USAGE_MOUNTABLE | ESP_EXT_PART_USAGE_RAW)) {
-        matches++;
-    }
-    TEST_ASSERT_EQUAL(2, matches);
 
     TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
     free(mbr);
@@ -1156,6 +1124,199 @@ TEST_CASE("Test parse skips unknown type and marks lossy", "[esp_ext_part_table]
     // Only the FAT32 partition made it into the list.
     TEST_ASSERT_EQUAL(1, count_list_items(&parsed));
     TEST_ASSERT_NOT_EQUAL(0, parsed.flags & ESP_EXT_PART_LIST_FLAG_LOSSY);
+
+    TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
+    free(mbr);
+}
+
+// --- Predicate-based iteration (esp_ext_part_list_next_matching) ---
+
+// Predicate: match a single fixed type (ignores ctx).
+static bool match_is_fat32(const esp_ext_part_t *info, void *ctx)
+{
+    (void) ctx;
+    return info->type == ESP_EXT_PART_TYPE_FAT32;
+}
+
+// Predicate: match any type contained in a caller-provided set passed via ctx.
+typedef struct {
+    const uint8_t *types;
+    size_t count;
+} type_set_t;
+
+static bool match_type_in_set(const esp_ext_part_t *info, void *ctx)
+{
+    const type_set_t *set = (const type_set_t *) ctx;
+    for (size_t i = 0; i < set->count; i++) {
+        if (info->type == set->types[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Predicate: match on a runtime field (size at least the threshold passed via ctx).
+static bool match_size_at_least(const esp_ext_part_t *info, void *ctx)
+{
+    uint64_t threshold = *(const uint64_t *) ctx;
+    return info->size >= threshold;
+}
+
+TEST_CASE("Test esp_ext_part_list_next_matching with a type predicate", "[esp_ext_part_table]")
+{
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    generate_mixed_usage_mbr(mbr); // FAT32 + exFAT + 0xDA
+
+    esp_ext_part_list_t parsed = {0};
+    TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, NULL));
+
+    // First (and only) FAT32 is found, then NULL.
+    esp_ext_part_match_t matcher = { .fn = match_is_fat32 };
+    esp_ext_part_list_item_t *it = esp_ext_part_list_next_matching(NULL, &parsed, &matcher);
+    TEST_ASSERT_NOT_NULL(it);
+    TEST_ASSERT_EQUAL(ESP_EXT_PART_TYPE_FAT32, it->info.type);
+    TEST_ASSERT_NULL(esp_ext_part_list_next_matching(it, &parsed, &matcher));
+
+    TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
+    free(mbr);
+}
+
+TEST_CASE("Test esp_ext_part_list_next_matching with a ctx set predicate", "[esp_ext_part_table]")
+{
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    generate_mixed_usage_mbr(mbr); // FAT32 + exFAT + 0xDA
+
+    esp_ext_part_list_t parsed = {0};
+    TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, NULL));
+
+    // "Types I can handle in this build" = FAT32 + raw data. Should match 2 items.
+    uint8_t wanted[] = { ESP_EXT_PART_TYPE_FAT32, ESP_EXT_PART_TYPE_RAW_DATA };
+    type_set_t set = { .types = wanted, .count = 2 };
+    esp_ext_part_match_t matcher = { .fn = match_type_in_set, .ctx = &set };
+
+    int matches = 0;
+    for (esp_ext_part_list_item_t *it = esp_ext_part_list_next_matching(NULL, &parsed, &matcher);
+            it != NULL;
+            it = esp_ext_part_list_next_matching(it, &parsed, &matcher)) {
+        matches++;
+    }
+    TEST_ASSERT_EQUAL(2, matches);
+
+    TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
+    free(mbr);
+}
+
+TEST_CASE("Test esp_ext_part_list_next_matching branches on a runtime field", "[esp_ext_part_table]")
+{
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    generate_mixed_usage_mbr(mbr); // all three partitions are 2048 sectors == 1 MiB
+
+    esp_ext_part_list_t parsed = {0};
+    TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, NULL));
+
+    // Threshold above every partition's size -> no match.
+    uint64_t big = esp_ext_part_sector_count_to_bytes(4096, ESP_EXT_PART_SECTOR_SIZE_512B);
+    esp_ext_part_match_t big_matcher = { .fn = match_size_at_least, .ctx = &big };
+    TEST_ASSERT_NULL(esp_ext_part_list_next_matching(NULL, &parsed, &big_matcher));
+
+    // Threshold at or below every partition's size -> all three match.
+    uint64_t small = esp_ext_part_sector_count_to_bytes(2048, ESP_EXT_PART_SECTOR_SIZE_512B);
+    esp_ext_part_match_t small_matcher = { .fn = match_size_at_least, .ctx = &small };
+    int matches = 0;
+    for (esp_ext_part_list_item_t *it = esp_ext_part_list_next_matching(NULL, &parsed, &small_matcher);
+            it != NULL;
+            it = esp_ext_part_list_next_matching(it, &parsed, &small_matcher)) {
+        matches++;
+    }
+    TEST_ASSERT_EQUAL(3, matches);
+
+    TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
+    free(mbr);
+}
+
+TEST_CASE("Test esp_ext_part_list_next_matching handles NULL predicate and list", "[esp_ext_part_table]")
+{
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    generate_mixed_usage_mbr(mbr);
+
+    esp_ext_part_list_t parsed = {0};
+    TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, NULL));
+
+    // NULL matcher pointer -> nothing matches.
+    TEST_ASSERT_NULL(esp_ext_part_list_next_matching(NULL, &parsed, NULL));
+    // Matcher with NULL fn -> nothing matches.
+    esp_ext_part_match_t empty = {0};
+    TEST_ASSERT_NULL(esp_ext_part_list_next_matching(NULL, &parsed, &empty));
+    // NULL list with NULL from -> NULL.
+    esp_ext_part_match_t matcher = { .fn = match_is_fat32 };
+    TEST_ASSERT_NULL(esp_ext_part_list_next_matching(NULL, NULL, &matcher));
+
+    TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
+    free(mbr);
+}
+
+// The stock esp_ext_part_match_mountable predicate: FAT* always mountable, the
+// non-filesystem / undrivable types never, and LittleFS mountable here because the
+// test build defines ESP_EXT_PART_HAS_LITTLEFS.
+TEST_CASE("Test esp_ext_part_match_mountable classifies types", "[esp_ext_part_table]")
+{
+    esp_ext_part_match_t matcher = esp_ext_part_match_mountable();
+    TEST_ASSERT_NOT_NULL(matcher.fn);
+    esp_ext_part_t info = {0};
+
+    info.type = ESP_EXT_PART_TYPE_FAT12;
+    TEST_ASSERT_TRUE(matcher.fn(&info, matcher.ctx));
+    info.type = ESP_EXT_PART_TYPE_FAT16;
+    TEST_ASSERT_TRUE(matcher.fn(&info, matcher.ctx));
+    info.type = ESP_EXT_PART_TYPE_FAT32;
+    TEST_ASSERT_TRUE(matcher.fn(&info, matcher.ctx));
+
+    // LittleFS: mountable because ESP_EXT_PART_HAS_LITTLEFS is defined for this build.
+    info.type = ESP_EXT_PART_TYPE_LITTLEFS;
+    TEST_ASSERT_TRUE(matcher.fn(&info, matcher.ctx));
+
+    // Not mountable: raw data, exFAT/NTFS, Linux, GPT-protective, none.
+    info.type = ESP_EXT_PART_TYPE_RAW_DATA;
+    TEST_ASSERT_FALSE(matcher.fn(&info, matcher.ctx));
+    info.type = ESP_EXT_PART_TYPE_EXFAT_OR_NTFS;
+    TEST_ASSERT_FALSE(matcher.fn(&info, matcher.ctx));
+    info.type = ESP_EXT_PART_TYPE_LINUX_ANY;
+    TEST_ASSERT_FALSE(matcher.fn(&info, matcher.ctx));
+    info.type = ESP_EXT_PART_TYPE_GPT_PROTECTIVE_MBR;
+    TEST_ASSERT_FALSE(matcher.fn(&info, matcher.ctx));
+    info.type = ESP_EXT_PART_TYPE_NONE;
+    TEST_ASSERT_FALSE(matcher.fn(&info, matcher.ctx));
+}
+
+// The stock predicate composes with the iterator: on a FAT32 + exFAT + 0xDA disk,
+// only the FAT32 partition is mountable.
+TEST_CASE("Test esp_ext_part_match_mountable via next_matching", "[esp_ext_part_table]")
+{
+    mbr_t *mbr = (mbr_t *) calloc(1, sizeof(mbr_t));
+    TEST_ASSERT_NOT_NULL(mbr);
+    generate_mixed_usage_mbr(mbr); // FAT32 (mountable) + exFAT + 0xDA (not)
+
+    esp_ext_part_list_t parsed = {0};
+    TEST_ESP_OK(esp_mbr_parse((void *) mbr, &parsed, NULL));
+
+    int matches = 0;
+    esp_ext_part_list_item_t *first = NULL;
+    esp_ext_part_match_t matcher = esp_ext_part_match_mountable();
+    for (esp_ext_part_list_item_t *it = esp_ext_part_list_next_matching(NULL, &parsed, &matcher);
+            it != NULL;
+            it = esp_ext_part_list_next_matching(it, &parsed, &matcher)) {
+        if (first == NULL) {
+            first = it;
+        }
+        matches++;
+    }
+    TEST_ASSERT_EQUAL(1, matches);
+    TEST_ASSERT_NOT_NULL(first);
+    TEST_ASSERT_EQUAL(ESP_EXT_PART_TYPE_FAT32, first->info.type);
 
     TEST_ESP_OK(esp_ext_part_list_deinit(&parsed));
     free(mbr);

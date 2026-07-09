@@ -50,7 +50,7 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
     // Set defaults
     part_list->sector_size = ESP_EXT_PART_SECTOR_SIZE_512B; // Default sector size
     bool (*f_parse_supported_partition_types)(uint8_t, uint8_t *) = esp_mbr_parse_default_supported_partition_types;
-    esp_ext_part_usage_t usage_mask = ESP_EXT_PART_USAGE_ALL; // Default: insert all recognized partitions
+    const esp_ext_part_match_t *matcher = NULL; // Optional parse-time filter (NULL / NULL fn = keep all)
 
     // Load extra arguments if provided
     if (extra_args) {
@@ -60,9 +60,7 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
         if (extra_args->esp_mbr_parse_custom_supported_partition_types) {
             f_parse_supported_partition_types = extra_args->esp_mbr_parse_custom_supported_partition_types; // Use a custom function for supported partition types
         }
-        if (extra_args->usage_filter != 0) {
-            usage_mask = extra_args->usage_filter; // Restrict to the requested usage classes
-        }
+        matcher = &extra_args->match; // .fn == NULL keeps all recognized partitions
     }
 
     esp_err_t err = ESP_OK;
@@ -85,19 +83,13 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
             break; // No more partitions, exit the loop (MBR partition table cannot have holes in it)
         }
 
-        // Resolve the partition type. The bool return is not used to gate insertion
-        // anymore; classification is done via esp_ext_part_type_usage below.
+        // Resolve the partition type. The bool return is not used to gate insertion;
+        // filtering is done by the optional `match` predicate below.
         uint8_t parsed_type = ESP_EXT_PART_TYPE_NONE;
         (void) f_parse_supported_partition_types(partition->type, &parsed_type);
         if (parsed_type == ESP_EXT_PART_TYPE_NONE) {
             // Unknown/extended type: cannot be represented, so a regenerated table
             // would differ from the source.
-            part_list->flags |= ESP_EXT_PART_LIST_FLAG_LOSSY;
-            continue;
-        }
-
-        // Skip partitions whose usage class is not requested by the caller.
-        if ((esp_ext_part_type_usage(parsed_type) & usage_mask) == 0) {
             part_list->flags |= ESP_EXT_PART_LIST_FLAG_LOSSY;
             continue;
         }
@@ -120,6 +112,13 @@ esp_err_t esp_mbr_parse(void *mbr_buf,
 
         // Set the flags or extra field based on the partition type or do any extra actions needed
         ext_part_list_item_do_extra(&item, partition);
+
+        // Apply the optional parse-time filter on the fully-populated info. A rejected
+        // partition is dropped, which makes a regenerated table differ from the source.
+        if (matcher != NULL && matcher->fn != NULL && !matcher->fn(&item.info, matcher->ctx)) {
+            part_list->flags |= ESP_EXT_PART_LIST_FLAG_LOSSY;
+            continue;
+        }
 
         // Add the partition info to the output table
         err = esp_ext_part_list_insert(part_list, &item);

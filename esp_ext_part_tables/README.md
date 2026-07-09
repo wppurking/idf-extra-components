@@ -10,49 +10,77 @@ Currently only [MBR (Master boot record)](https://en.wikipedia.org/wiki/Master_b
 - Generate and manipulate partition lists in memory
 - Deep copy and de-initialize partition lists
 - Access partition information (address, size, type, label)
-- Classify and filter partitions by usage (mountable / raw / unsupported)
+- Filter partitions with a caller predicate (e.g. only mountable filesystems)
 - Example projects included
 
-## Partition usage classification and filtering (MBR parsing)
+## Partition selection and filtering (MBR parsing)
 
 `esp_mbr_parse` inserts **every recognized partition** into the list by default,
-regardless of whether ESP-IDF can mount it. Each partition can be classified by
-`esp_ext_part_type_usage(item->info.type)` into one of three usage classes
-(`esp_ext_part_usage_t`, usable as an OR'd mask):
+regardless of whether ESP-IDF can mount it (FAT12/16/32, LittleFS, `0xDA` raw data,
+and also recognized-but-undrivable types such as exFAT/NTFS, Linux and
+GPT-protective MBR). Only truly unknown/extended type codes are skipped.
 
-- `ESP_EXT_PART_USAGE_MOUNTABLE`: a known filesystem with an ESP-IDF driver
-  (FAT12/16/32, LittleFS).
-- `ESP_EXT_PART_USAGE_RAW`: recognized but has no filesystem to mount by design
-  (e.g. `0xDA` raw data); the application owns the raw bytes.
-- `ESP_EXT_PART_USAGE_UNSUPPORTED`: a recognized type with no ESP-IDF driver
-  (exFAT/NTFS, Linux, GPT-protective MBR).
+To select a subset, iterate with a predicate via `esp_ext_part_list_next_matching`,
+or filter at parse time with `esp_mbr_parse_extra_args_t.match`.
 
-To iterate only certain classes, use `esp_ext_part_list_next_by_usage` (it mirrors
-`esp_ext_part_list_item_head`/`_next` but skips non-matching items):
+The usage classes are a coarse, *type-intrinsic* hint. Whether a filesystem is
+actually **mountable in a given firmware** depends on which drivers are linked in
+that build (for example LittleFS is an optional external component), which the
+library cannot decide on its own. So mountability is expressed as a predicate.
+
+The library ships a ready-made matcher, `esp_ext_part_match_mountable()`, so you
+usually do not need to write your own. It treats FAT12/16/32 as always mountable
+(FatFs is part of ESP-IDF) and LittleFS as mountable when the LittleFS component is
+visible at compile time (detected via `__has_include("esp_littlefs.h")`, or forced by
+defining `ESP_EXT_PART_HAS_LITTLEFS`):
 
 ```c
-// Iterate only the mountable partitions.
-for (esp_ext_part_list_item_t *it = esp_ext_part_list_next_by_usage(NULL, &part_list, ESP_EXT_PART_USAGE_MOUNTABLE);
+esp_ext_part_match_t matcher = esp_ext_part_match_mountable();
+for (esp_ext_part_list_item_t *it = esp_ext_part_list_next_matching(NULL, &part_list, &matcher);
      it != NULL;
-     it = esp_ext_part_list_next_by_usage(it, &part_list, ESP_EXT_PART_USAGE_MOUNTABLE)) {
-    // ...
+     it = esp_ext_part_list_next_matching(it, &part_list, &matcher)) {
+    // it points to a partition this build can mount
 }
 ```
 
-To restrict what gets inserted at parse time, set `usage_filter` on
-`esp_mbr_parse_extra_args_t` (OR the classes you want). Left `0`, all recognized
-partitions are inserted:
+To decide differently - e.g. gate on a specific Kconfig option, or branch on a
+runtime field such as a LittleFS block size stored in `info->extra` - supply your own
+predicate. It receives the full partition info plus an opaque context:
 
 ```c
-esp_mbr_parse_extra_args_t args = { .usage_filter = ESP_EXT_PART_USAGE_MOUNTABLE };
-esp_mbr_parse((void*) loaded_mbr, &part_list, &args); // only mountable partitions
+static bool i_can_mount(const esp_ext_part_t *info, void *ctx)
+{
+    switch (info->type) {
+    case ESP_EXT_PART_TYPE_FAT12:
+    case ESP_EXT_PART_TYPE_FAT16:
+    case ESP_EXT_PART_TYPE_FAT32:
+        return true;              // FatFs is part of ESP-IDF
+#ifdef CONFIG_LITTLEFS_PAGE_SIZE // only if THIS build links the LittleFS component
+    case ESP_EXT_PART_TYPE_LITTLEFS:
+        return true;
+#endif
+    default:
+        return false;
+    }
+}
+
+// esp_ext_part_match_t matcher = { .fn = i_can_mount };
+// ... esp_ext_part_list_next_matching(NULL, &part_list, &matcher) ...
 ```
 
-Whenever the parser skips a partition (an unknown/extended type, or one excluded by
-`usage_filter`), it sets `ESP_EXT_PART_LIST_FLAG_LOSSY` on the list. When that flag
-is **unset**, every partition on the source medium was captured, so regenerating an
-MBR from the list is functionally equivalent to the source (ignoring cosmetic
-differences such as CHS values or the disk signature).
+The same predicate can filter **at parse time** via `esp_mbr_parse_extra_args_t`, so
+unwanted partitions are never inserted:
+
+```c
+esp_mbr_parse_extra_args_t args = { .match = esp_ext_part_match_mountable() };
+esp_mbr_parse((void*) loaded_mbr, &part_list, &args); // only mountable partitions inserted
+```
+
+Whenever the parser skips a partition (an unknown/extended type, or one rejected by
+`match`), it sets `ESP_EXT_PART_LIST_FLAG_LOSSY` on the list. When that flag is
+**unset**, every partition on the source medium was captured, so regenerating an MBR
+from the list is functionally equivalent to the source (ignoring cosmetic differences
+such as CHS values or the disk signature).
 
 ## Alignment and layout validation (MBR generation)
 

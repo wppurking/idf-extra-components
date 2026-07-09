@@ -151,18 +151,3 @@ char *parsed_type_to_str(uint8_t type)
     }
     return "unknown";
 }
-
-const char *usage_to_str(esp_ext_part_usage_t usage)
-{
-    switch (usage) {
-    case ESP_EXT_PART_USAGE_MOUNTABLE:
-        return "mountable";
-    case ESP_EXT_PART_USAGE_RAW:
-        return "raw";
-    case ESP_EXT_PART_USAGE_UNSUPPORTED:
-        return "unsupported";
-    default:
-        break;
-    }
-    return "unclassified";
-}

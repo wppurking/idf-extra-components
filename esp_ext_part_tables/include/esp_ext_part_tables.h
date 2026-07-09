@@ -74,23 +74,8 @@ typedef enum {
 typedef enum {
     ESP_EXT_PART_LIST_FLAG_NONE = 0,
     ESP_EXT_PART_LIST_FLAG_READ_ONLY = 1 << 0, /*!< Read-only partition list */
-    ESP_EXT_PART_LIST_FLAG_LOSSY = 1 << 1, /*!< Set by the parser when one or more source partitions were skipped (unknown/extended type, or excluded by `usage_filter`), so a regenerated table would NOT be functionally equivalent to the source. Unset = every recognized partition was captured. */
+    ESP_EXT_PART_LIST_FLAG_LOSSY = 1 << 1, /*!< Set by the parser when one or more source partitions were skipped (an unknown/extended type, or one rejected by the parse `match` predicate), so a regenerated table would NOT be functionally equivalent to the source. Unset = every recognized partition was captured. */
 } esp_ext_part_list_flags_t;
-
-/**
- * @brief Usage classification of a partition, based on its type.
- *
- * Bit-flags so classes can be OR'd together (e.g. for `usage_filter` or
- * `esp_ext_part_list_next_by_usage`).
- */
-typedef enum {
-    ESP_EXT_PART_USAGE_NONE        = 0,      /*!< No usage class (empty or unknown partition type). */
-    ESP_EXT_PART_USAGE_MOUNTABLE   = 1 << 0, /*!< Known filesystem with an ESP-IDF driver (FAT12/16/32, LittleFS). */
-    ESP_EXT_PART_USAGE_RAW         = 1 << 1, /*!< Recognized but has no filesystem to mount by design (e.g. 0xDA raw data); the application owns the raw bytes. */
-    ESP_EXT_PART_USAGE_UNSUPPORTED = 1 << 2, /*!< Recognized type but ESP-IDF has no driver for it (exFAT/NTFS, Linux, GPT-protective MBR). */
-    /*!< Convenience mask matching every usage class. */
-    ESP_EXT_PART_USAGE_ALL         = (ESP_EXT_PART_USAGE_MOUNTABLE | ESP_EXT_PART_USAGE_RAW | ESP_EXT_PART_USAGE_UNSUPPORTED),
-} esp_ext_part_usage_t;
 
 typedef enum {
     ESP_EXT_PART_LIST_SIGNATURE_MBR, /*!< MBR signature type */
@@ -214,33 +199,63 @@ esp_ext_part_list_item_t *esp_ext_part_list_item_head(esp_ext_part_list_t *part_
 esp_ext_part_list_item_t *esp_ext_part_list_item_next(esp_ext_part_list_item_t *item);
 
 /**
- * @brief Get the usage classification of a partition type.
+ * @brief Caller-supplied predicate deciding whether a partition matches.
  *
- * The classification is derived purely from the type; nothing is stored on the
- * partition item.
+ * @param[in] info Partition info (type, address, size, flags, extra, label).
+ * @param[in] ctx  Opaque caller context passed through unchanged (may be NULL).
  *
- * @param[in] type Partition type (a value of `esp_ext_part_type_known_t`, stored in `esp_ext_part_t::type`).
- *
- * @return The usage class (`ESP_EXT_PART_USAGE_MOUNTABLE`, `ESP_EXT_PART_USAGE_RAW`,
- *         or `ESP_EXT_PART_USAGE_UNSUPPORTED`), or 0 if the type has no class
- *         (e.g. `ESP_EXT_PART_TYPE_NONE` or an unknown type).
+ * @return true to select this partition, false to skip it.
  */
-esp_ext_part_usage_t esp_ext_part_type_usage(uint8_t type);
+typedef bool (*esp_ext_part_match_fn)(const esp_ext_part_t *info, void *ctx);
 
 /**
- * @brief Iterate over partition list items matching a usage class mask.
+ * @brief A predicate together with its opaque context.
  *
- * Returns the next item whose usage class (see `esp_ext_part_type_usage`)
- * intersects the given `usage` mask. Mirrors `esp_ext_part_list_item_head` /
- * `esp_ext_part_list_item_next`, but skips items that do not match.
+ * Bundles `fn` and the `ctx` passed to it, so a matcher can be stored and passed
+ * around as a single value. A zero-initialized matcher (`fn == NULL`) matches
+ * nothing.
+ */
+typedef struct {
+    esp_ext_part_match_fn fn; /*!< Predicate; NULL means "match nothing". */
+    void *ctx;                /*!< Opaque context passed to `fn` (may be NULL). */
+} esp_ext_part_match_t;
+
+/**
+ * @brief Iterate partition list items matching a caller-supplied predicate.
  *
- * @param[in] from  Current item; pass NULL to start from the head of `list`.
- * @param[in] list  Partition list to iterate (used only when `from` is NULL).
- * @param[in] usage OR'd mask of `esp_ext_part_usage_t` classes to match.
+ * The predicate can branch on any partition field and on caller/build state - for
+ * example "mountable in THIS build", which depends on which filesystem drivers are
+ * linked and therefore cannot be decided by the library itself. Mirrors
+ * `esp_ext_part_list_item_head` / `esp_ext_part_list_item_next`, but skips items the
+ * predicate rejects. Pass NULL as `from` to search from the head, or a previously
+ * returned item to continue (e.g. to find the N-th match).
+ *
+ * @param[in] from    Current item; pass NULL to start from the head of `list`.
+ * @param[in] list    Partition list to iterate (used only when `from` is NULL).
+ * @param[in] matcher Predicate + context; if NULL, or its `fn` is NULL, nothing matches.
  *
  * @return Pointer to the next matching item, or NULL if there are no more.
  */
-esp_ext_part_list_item_t *esp_ext_part_list_next_by_usage(esp_ext_part_list_item_t *from, const esp_ext_part_list_t *list, esp_ext_part_usage_t usage);
+esp_ext_part_list_item_t *esp_ext_part_list_next_matching(esp_ext_part_list_item_t *from, const esp_ext_part_list_t *list, const esp_ext_part_match_t *matcher);
+
+/**
+ * @brief Get a stock matcher selecting partitions ESP-IDF can mount.
+ *
+ * Returns a ready-to-use `esp_ext_part_match_t` for `esp_ext_part_list_next_matching`
+ * (or `esp_mbr_parse_extra_args_t::match`) when you just want "the partitions this
+ * build can mount" without writing your own predicate.
+ *
+ * - FAT12/16/32 are always considered mountable (FatFs is part of ESP-IDF).
+ * - LittleFS is considered mountable only when the LittleFS component is available
+ *   to this library at compile time - detected via `__has_include("esp_littlefs.h")`,
+ *   or forced by defining `ESP_EXT_PART_HAS_LITTLEFS`. If neither applies, LittleFS
+ *   is reported as not mountable (a safe under-report rather than a false claim).
+ * - All other types (raw data, exFAT/NTFS, Linux, GPT-protective, none) are not
+ *   mountable.
+ *
+ * @return A matcher whose `fn` reports whether a partition is mountable in this build.
+ */
+esp_ext_part_match_t esp_ext_part_match_mountable(void);
 
 /**
  * @brief Get the signature of an external partition list.

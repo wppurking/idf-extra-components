@@ -31,25 +31,25 @@ void print_loaded_ext_partitions(esp_ext_part_list_item_t *head)
     esp_ext_part_list_item_t *it = head;
     int i = 0;
     do {
-        printf("Partition %d:\n\tLBA start sector: %" PRIu64 ", address: %" PRIu64 ",\n\tsector count: %" PRIu64 ", size: %" PRIu64 ",\n\ttype: %s\n\tusage: %s\n\n",
+        printf("Partition %d:\n\tLBA start sector: %" PRIu64 ", address: %" PRIu64 ",\n\tsector count: %" PRIu64 ", size: %" PRIu64 ",\n\ttype: %s\n\n",
                i,
                esp_ext_part_bytes_to_sector_count(it->info.address, ESP_EXT_PART_SECTOR_SIZE_512B), it->info.address,
                esp_ext_part_bytes_to_sector_count(it->info.size, ESP_EXT_PART_SECTOR_SIZE_512B), it->info.size,
-               parsed_type_to_str(it->info.type),
-               usage_to_str(esp_ext_part_type_usage(it->info.type)));
+               parsed_type_to_str(it->info.type));
         i++;
     } while ((it = esp_ext_part_list_item_next(it)) != NULL);
     fflush(stdout);
 }
 
-// List only the partitions ESP-IDF could mount, using the usage iterator.
+// List only the partitions this build can mount, using the stock mountable predicate.
 static void print_mountable_partitions(esp_ext_part_list_t *part_list)
 {
-    ESP_LOGI(TAG, "Mountable partitions (via esp_ext_part_list_next_by_usage):");
+    ESP_LOGI(TAG, "Mountable partitions (via esp_ext_part_list_next_matching):");
     int count = 0;
-    for (esp_ext_part_list_item_t *it = esp_ext_part_list_next_by_usage(NULL, part_list, ESP_EXT_PART_USAGE_MOUNTABLE);
+    esp_ext_part_match_t matcher = esp_ext_part_match_mountable();
+    for (esp_ext_part_list_item_t *it = esp_ext_part_list_next_matching(NULL, part_list, &matcher);
             it != NULL;
-            it = esp_ext_part_list_next_by_usage(it, part_list, ESP_EXT_PART_USAGE_MOUNTABLE)) {
+            it = esp_ext_part_list_next_matching(it, part_list, &matcher)) {
         printf("\t- %s at sector %" PRIu64 "\n",
                parsed_type_to_str(it->info.type),
                esp_ext_part_bytes_to_sector_count(it->info.address, ESP_EXT_PART_SECTOR_SIZE_512B));
